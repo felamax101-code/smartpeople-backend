@@ -1,0 +1,1028 @@
+from __future__ import annotations
+
+import builtins
+import contextvars
+import dataclasses
+import datetime as _dt
+import importlib
+import logging
+import os
+import random
+import struct
+import sys
+import threading
+import types
+import typing
+from collections.abc import Callable, Iterator, Mapping, MutableMapping, Sequence
+from contextlib import contextmanager
+from importlib.abc import Loader, MetaPathFinder
+from importlib.machinery import ModuleSpec
+from importlib.util import spec_from_loader
+from typing import Any, NoReturn
+
+logger = logging.getLogger(__name__)
+
+
+# When True, proxy modules enforce restrictions.  When False (default),
+# attribute access on proxy modules falls through to the real module.
+# This allows concurrent coroutines that are NOT running a workflow to
+# use the real module even while the sandbox has replaced sys.modules.
+_in_sandbox: contextvars.ContextVar[bool] = contextvars.ContextVar("_in_sandbox", default=False)
+
+# The real, process-wide sys.modules dict, captured before we install the
+# dispatching proxy below.  Any context that is not running a workflow reads
+# and writes this dict directly, so non-workflow code is unaffected.
+_real_sys_modules: dict[str, types.ModuleType] = sys.modules
+
+# Per-sandbox module table.  Each sandbox sets this to its own dict (see
+# Sandbox.enter) so runs in different sandboxes — whether on different asyncio
+# tasks or different threads — never share or clobber each other's modules.
+# ``None`` means "use the real table".
+_sandbox_sys_modules: contextvars.ContextVar[dict[str, types.ModuleType] | None] = (
+    contextvars.ContextVar("_sandbox_sys_modules", default=None)
+)
+
+# Extra passthrough modules for the active sandbox, from
+# SandboxPolicy.passthrough_modules.
+_policy_passthroughs: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "_policy_passthroughs", default=frozenset()
+)
+
+
+class SandboxRestrictionError(RuntimeError):
+    """Raised when workflow code calls a non-deterministic function."""
+
+
+# TODO: We should have a more proper proxy that blocks __call__ and
+# returns proxied members but otherwise looks the same.
+def _restricted(name: str) -> Callable[..., NoReturn]:
+    def _raise(*_args: Any, **_kwargs: Any) -> NoReturn:
+        raise SandboxRestrictionError(
+            f"Cannot call {name}() inside a workflow. Workflows must be deterministic."
+        )
+
+    _raise.__qualname__ = f"<restricted {name}>"
+    return _raise
+
+
+@dataclasses.dataclass(frozen=True)
+class _ModulePolicy:
+    module_name: str
+    overrides: dict[str, Any] = dataclasses.field(default_factory=dict)
+    drops: frozenset[str] = dataclasses.field(default_factory=frozenset)
+    allowed: frozenset[str] | None = None
+    allow_if: Callable[[str], bool] | None = None
+
+    def post_exec(self, *, proxy: _ProxyModule, module: types.ModuleType) -> None:
+        pass
+
+    def resolve_attr(self, name: str, real: types.ModuleType) -> Any:
+        """Resolve an allowed attribute on the real module.
+
+        Called by ``_ProxyModule.__getattr__`` as the final fallback.
+        Subclasses can override to intercept (e.g. per-context random).
+        """
+        return getattr(real, name)
+
+
+def _context_restricted(name: str, real_fn: Any) -> Callable[..., Any]:
+    """Like ``_restricted`` but falls through to *real_fn* outside sandbox context.
+
+    Used for builtins overrides where CPython's ``LOAD_GLOBAL`` reads
+    ``__dict__`` directly, bypassing ``__getattr__``.
+    """
+
+    def _wrapper(*_args: Any, **_kwargs: Any) -> Any:
+        if _in_sandbox.get(False):
+            raise SandboxRestrictionError(
+                f"Cannot call {name}() inside a workflow. Workflows must be deterministic."
+            )
+        return real_fn(*_args, **_kwargs)
+
+    _wrapper.__qualname__ = f"<workflow-context-restricted {name}>"
+    return _wrapper
+
+
+def _blocklist(
+    module: str, *attrs: str, drops: list[str] | None = None, **overrides: Any
+) -> _ModulePolicy:
+    """Restrict specific attributes; everything else passes through."""
+    d = {attr: _restricted(f"{module}.{attr}") for attr in attrs}
+    d.update(overrides)
+    return _ModulePolicy(module_name=module, overrides=d, drops=frozenset(drops or []))
+
+
+def _allowlist(
+    module: str,
+    *attrs: str,
+    allow_if: Callable[[str], bool] | None = None,
+    drops: list[str] | None = None,
+    **overrides: Any,
+) -> _ModulePolicy:
+    """Allow only the listed attributes; everything else is restricted."""
+    return _ModulePolicy(
+        module_name=module,
+        overrides=overrides,
+        allowed=frozenset(attrs),
+        drops=frozenset(drops or []),
+        allow_if=allow_if,
+    )
+
+
+class _AsyncioPolicy(_ModulePolicy):
+    """Apply submodule policies to modules re-exported by ``asyncio``."""
+
+    def resolve_attr(self, name: str, real: types.ModuleType) -> Any:
+        value = super().resolve_attr(name, real)
+        if name == "events":
+            return _ProxyModule(value, _ASYNCIO_EVENTS_POLICY)
+        if name in {"runners", "subprocess", "threads"}:
+            return _StubModule(f"asyncio.{name}", value)
+        return value
+
+
+class _RestrictedDatetimeMeta(type):
+    def __instancecheck__(cls, instance: Any) -> bool:
+        return isinstance(instance, _dt.datetime)
+
+    def __subclasscheck__(cls, subclass: type) -> bool:
+        return issubclass(subclass, _dt.datetime)
+
+
+class _RestrictedDatetime(_dt.datetime, metaclass=_RestrictedDatetimeMeta):
+    @classmethod  # type: ignore[override]
+    def now(cls, tz: _dt.timezone | None = None) -> NoReturn:  # type: ignore[override]
+        _restricted("datetime.datetime.now")()
+
+    @classmethod  # type: ignore[override]
+    def utcnow(cls) -> NoReturn:  # type: ignore[override]
+        _restricted("datetime.datetime.utcnow")()
+
+
+class _RestrictedDateMeta(type):
+    def __instancecheck__(cls, instance: Any) -> bool:
+        return isinstance(instance, _dt.date)
+
+    def __subclasscheck__(cls, subclass: type) -> bool:
+        return issubclass(subclass, _dt.date)
+
+
+class _RestrictedDate(_dt.date, metaclass=_RestrictedDateMeta):
+    @classmethod  # type: ignore[override]
+    def today(cls) -> NoReturn:  # type: ignore[override]
+        _restricted("datetime.date.today")()
+
+
+class _RestrictedRandomMeta(type):
+    def __instancecheck__(cls, instance: Any) -> bool:
+        return isinstance(instance, random.Random)
+
+    def __subclasscheck__(cls, subclass: type) -> bool:
+        return issubclass(subclass, random.Random)
+
+
+class _RestrictedRandom(random.Random, metaclass=_RestrictedRandomMeta):
+    def seed(
+        self,
+        a: Any = None,
+        version: int = 2,
+    ) -> None:
+        if a is None:
+            _restricted("random.Random.seed")()
+        super().seed(a, version=version)
+
+
+def _host_system() -> str:
+    return _host_import("platform").system()
+
+
+_ASYNCIO_EVENTS_POLICY = _blocklist(
+    "asyncio.events",
+    "new_event_loop",
+    "set_event_loop",
+    "get_event_loop_policy",
+    "set_event_loop_policy",
+    "get_child_watcher",
+    "BaseDefaultEventLoopPolicy",
+)
+
+
+_RESTRICTIONS: dict[str, _ModulePolicy] = {
+    "builtins": _blocklist("builtins", "open", "input", "breakpoint", "eval", "exec", "compile"),
+    "datetime": _blocklist("datetime", datetime=_RestrictedDatetime, date=_RestrictedDate),
+    "platform": _allowlist(
+        "platform",
+        system=_host_system,
+    ),
+    "os": _allowlist(
+        "os",
+        "path",
+        "sep",
+        "altsep",
+        "extsep",
+        "pathsep",
+        "curdir",
+        "pardir",
+        "devnull",
+        "linesep",
+        "name",
+        "fsdecode",
+        "fsencode",
+        "fspath",
+        # These are deterministic enough if the functions that change
+        # them are blocked...
+        "getenv",
+        "getcwd",
+        "_get_exports_list",
+        "PathLike",
+        environ=os.environ.copy(),
+        allow_if=str.isupper,
+        drops=["fork", "register_at_fork"],
+    ),
+    "random": _allowlist("random", Random=_RestrictedRandom),
+    "time": _allowlist(
+        "time",
+        "mktime",
+        "strptime",
+        "get_clock_info",
+        "clock_getres",
+        "struct_time",
+        allow_if=str.isupper,
+    ),
+    "socket": _allowlist(
+        "socket",
+        # byte-order conversions
+        "htonl",
+        "htons",
+        "ntohl",
+        "ntohs",
+        # address conversions
+        "inet_aton",
+        "inet_ntoa",
+        "inet_ntop",
+        "inet_pton",
+        # exception types (needed to catch errors from allowed code paths)
+        "error",
+        "gaierror",
+        "herror",
+        "timeout",
+        # all-caps constants (AF_*, SOCK_*, SOL_*, SO_*, IPPROTO_*, etc.)
+        allow_if=str.isupper,
+    ),
+    "threading": _blocklist(
+        "threading",
+        # thread creation
+        "Thread",
+        "Timer",
+        # global trace/profile hooks (affect all threads including host)
+        "settrace",
+        "settrace_all_threads",
+        "setprofile",
+        "setprofile_all_threads",
+    ),
+    "io": _blocklist("io", "open", "open_code", "FileIO"),
+    "_io": _blocklist("_io", "open", "open_code", "FileIO"),
+    "asyncio": _AsyncioPolicy(
+        "asyncio",
+        overrides=_blocklist(
+            "asyncio",
+            # Event loop creation and management escapes
+            "run",
+            "Runner",
+            "new_event_loop",
+            "set_event_loop",
+            "get_event_loop_policy",
+            "set_event_loop_policy",
+            "get_child_watcher",
+            "DefaultEventLoopPolicy",
+            # Threading / concurrency escapes
+            "to_thread",
+            "run_coroutine_threadsafe",
+            # Subprocesses
+            "create_subprocess_exec",
+            "create_subprocess_shell",
+            # Network / socket I/O
+            "open_connection",
+            "open_unix_connection",
+            "start_server",
+            "start_unix_server",
+            # Bridging external threaded futures
+            "wrap_future",
+        ).overrides,
+    ),
+    "asyncio.events": _ASYNCIO_EVENTS_POLICY,
+    "zstandard": _blocklist("zstandard", "open"),
+}
+
+_BLOCKED: set[str] = {
+    "subprocess",
+    "ssl",  # needs socket.socket class for inheritance; network I/O
+    "ctypes",  # arbitrary C calls bypass all Python-level restrictions
+    "multiprocessing",  # process creation via C-level fork/exec
+    # C extensions with direct syscalls that bypass Python-level restrictions
+    "signal",  # process-level signal handlers
+    "fcntl",  # fd operations (flock, ioctl)
+    "mmap",  # map files into memory
+    "sqlite3",  # direct file I/O for databases
+    "pty",  # pseudo-terminal creation + fork
+    "termios",  # terminal control
+    "resource",  # process resource limits
+    "faulthandler",  # write to arbitrary fds
+    "syslog",  # write to system log
+    "readline",  # terminal input
+    # Asyncio submodules for subprocesses, threads, and runners
+    "asyncio.subprocess",
+    "asyncio.runners",
+    "asyncio.threads",
+}
+
+_PASSTHROUGHS: set[str] = {
+    # Carefully selected stdlib modules that do not import any restricted modules
+    "abc",
+    "array",
+    "ast",
+    "asyncio",
+    "base64",
+    "binascii",
+    "bisect",
+    "cmath",
+    "codecs",
+    "collections",
+    "contextvars",
+    "copy",
+    "copyreg",
+    "csv",
+    "dataclasses",
+    "decimal",
+    "difflib",
+    "dis",
+    "encodings",
+    "enum",
+    "errno",
+    "fractions",
+    "functools",
+    "graphlib",
+    "hashlib",
+    "heapq",
+    "html",
+    "io",
+    "_io",
+    "ipaddress",
+    "itertools",
+    "json",
+    "keyword",
+    "ntpath",
+    "logging",
+    "math",
+    "numbers",
+    "operator",
+    # Wrap the initialized host module with the restrictions above. Re-running
+    # os.py would duplicate its platform-specific initialization in every
+    # sandbox and can expose a different ``os.path`` module object.
+    "os",
+    "posixpath",
+    "pprint",
+    "quopri",
+    "re",
+    "statistics",
+    "string",
+    "stringprep",
+    "struct",
+    "textwrap",
+    "token",
+    "tomllib",
+    "traceback",
+    "types",
+    "typing",
+    "unicodedata",
+    "weakref",
+    "zlib",
+    # C extension with per-module state (PEP 489 multi-phase init).
+    # Must share the host instance so the task registry is not lost.
+    "_asyncio",
+    # SDK internals — must share the singleton registries, runtime, etc.
+    "vercel",
+    # Common third-party deps that are side-effect-free
+    "pydantic",
+    "pydantic_core",
+    "anyio",
+    "sniffio",
+    "typing_extensions",
+    "annotated_types",
+    # Supporting zstandard here is a little ad-hoc, but it is a
+    # dependency of vercel-workflow itself, and httpx2 has an optional
+    # dependency on it and will try to import it. So importing httpx2
+    # would fail unless we allow zstandard. (Actually *using* httpx2
+    # will still actually fail, of course.)
+    "zstandard",
+}
+
+
+class _ProxyModule(types.ModuleType):
+    """A module proxy that intercepts specific attributes.
+
+    Attribute access first checks ``policy.overrides``, then — when
+    an allowlist is active — blocks anything not in the allowlist.
+    Everything else falls through to the wrapped real module.
+
+    When *copy_dict* is ``True`` (needed for ``builtins``), the real
+    module's entire ``__dict__`` is copied into the proxy so that
+    CPython's ``LOAD_GLOBAL`` bytecode — which reads
+    ``builtins.__dict__`` directly — sees the overridden values.
+    """
+
+    def __init__(
+        self,
+        real: types.ModuleType,
+        policy: _ModulePolicy,
+        *,
+        copy_dict: bool = False,
+    ) -> None:
+        super().__init__(real.__name__)
+        object.__setattr__(self, "_proxy_real", real)
+        object.__setattr__(self, "_proxy_policy", policy)
+        # Copy module metadata.
+        for attr in ("__package__", "__path__", "__file__", "__spec__", "__loader__", "__doc__"):
+            val = getattr(real, attr, None)
+            if val is not None:
+                self.__dict__[attr] = val
+        if copy_dict:
+            self.__dict__.update(real.__dict__)
+            # For dict-based lookups (builtins), overrides must be
+            # context-aware so concurrent coroutines outside the sandbox
+            # can still call the real functions.
+            for key, val in policy.overrides.items():
+                real_fn = real.__dict__.get(key)
+                if real_fn is not None and callable(val):
+                    self.__dict__[key] = _context_restricted(f"{policy.module_name}.{key}", real_fn)
+                else:
+                    self.__dict__[key] = val
+        else:
+            # Overrides go into __dict__ so they are found by direct
+            # dict lookup (important for builtins).
+            self.__dict__.update(policy.overrides)
+
+    def __getattr__(self, name: str) -> Any:
+        real = object.__getattribute__(self, "_proxy_real")
+        # Outside a sandbox context, delegate everything to the real module
+        # so concurrent coroutines are not affected by the global proxy.
+        if not _in_sandbox.get(False):
+            return getattr(real, name)
+        policy = object.__getattribute__(self, "_proxy_policy")
+        if name in policy.drops:
+            raise AttributeError(name)
+        if name in policy.overrides:
+            return policy.overrides[name]
+        # Allowlist mode: block anything not explicitly allowed
+        # (dunders always pass through for introspection / import machinery).
+        if (
+            policy.allowed is not None
+            and name not in policy.allowed
+            and not (name.startswith("__") and name.endswith("__"))
+            and not (policy.allow_if is not None and policy.allow_if(name))
+            # Only restrict callables (which will include classes).
+            and callable(policy.resolve_attr(name, real))
+        ):
+            # Return a restricted callable instead of raising immediately.
+            # This allows module init code like ``from os import urandom``
+            # to succeed — the error fires when the function is *called*.
+            return _restricted(f"{policy.module_name}.{name}")
+        return policy.resolve_attr(name, real)
+
+    def __repr__(self) -> str:
+        real = object.__getattribute__(self, "_proxy_real")
+        return f"<proxy for {real!r}>"
+
+
+class _StubModule(types.ModuleType):
+    """A stub module where every attribute access returns a restricted callable."""
+
+    def __init__(self, name: str, real: types.ModuleType | None = None) -> None:
+        super().__init__(name)
+        object.__setattr__(self, "_stub_real", real)
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        if not _in_sandbox.get(False):
+            real = object.__getattribute__(self, "_stub_real")
+            if real is not None:
+                return getattr(real, name)
+        return _restricted(f"{self.__name__}.{name}")
+
+
+def _host_import(fullname: str) -> types.ModuleType:
+    """Import *fullname* into the host module table and return it.
+
+    Temporarily leaves the sandbox context so the import runs with the real
+    ``sys.modules`` and the normal (unrestricted) finders.
+    """
+    table_token = _sandbox_sys_modules.set(None)
+    sandbox_token = _in_sandbox.set(False)
+    try:
+        return importlib.import_module(fullname)
+    finally:
+        _in_sandbox.reset(sandbox_token)
+        _sandbox_sys_modules.reset(table_token)
+
+
+class _SandboxFinder(MetaPathFinder):
+    """A MetaPathFinder that controls module loading inside the sandbox.
+
+    For every ``import X`` inside the sandbox:
+
+    1. If ``X`` **has restrictions**, return a ``_ProxyModule`` that
+       intercepts the restricted attributes.
+    2. If ``X`` **matches the passthrough set**, return the host module
+       as-is (importing it into the host first if needed).
+    3. Otherwise, return ``None`` for a fresh re-import.
+    """
+
+    def __init__(
+        self,
+        *,
+        host_modules: dict[str, types.ModuleType],
+        passthrough: set[str],
+        restrictions: dict[str, _ModulePolicy] | None = None,
+        blocked: set[str] | None = None,
+    ) -> None:
+        self._host = host_modules
+        self._passthrough = passthrough
+        self._restrictions = restrictions or {}
+        self._blocked = blocked or set()
+
+    def _is_passthrough(self, name: str) -> bool:
+        for prefixes in (self._passthrough, _policy_passthroughs.get()):
+            for prefix in prefixes:
+                if name == prefix or name.startswith(prefix + "."):
+                    return True
+        return False
+
+    def find_spec(
+        self,
+        fullname: str,
+        path: Sequence[str] | None,
+        target: types.ModuleType | None = None,
+    ) -> ModuleSpec | None:
+        # If we aren't actually in a sandbox, defer to the normal finders.
+        if not _in_sandbox.get(False):
+            return None
+        if fullname in self._blocked:
+            # Return a stub module instead of raising — other modules may
+            # ``import subprocess`` at module level but never call it.
+            # Every attribute access on the stub returns a restricted callable.
+            real = self._host.get(fullname)
+            return spec_from_loader(
+                fullname, _PreloadedLoader(_StubModule(fullname, real)), origin="blocked"
+            )
+        if fullname in self._restrictions:
+            policy = self._restrictions[fullname]
+            # If the module is also in the passthrough set, wrap the host module
+            # with a proxy instead of re-importing (avoids issues with packages that
+            # have complex init like asyncio or platform checks).
+            if self._is_passthrough(fullname):
+                host_mod = self._host.get(fullname)
+                if host_mod is None:
+                    host_mod = _host_import(fullname)
+                proxy = _ProxyModule(host_mod, policy)
+                policy.post_exec(
+                    proxy=proxy,
+                    module=host_mod,
+                )
+                return spec_from_loader(fullname, _PreloadedLoader(proxy), origin="sandbox")
+            real_spec = self._find_real_spec(fullname, path, target)
+            if real_spec is None:
+                raise ModuleNotFoundError(f"No module named {fullname!r}", name=fullname)
+            return ModuleSpec(
+                fullname,
+                _RestrictedLoader(
+                    real_spec,
+                    self._restrictions[fullname],
+                ),
+                origin=real_spec.origin,
+                is_package=real_spec.submodule_search_locations is not None,
+            )
+        if self._is_passthrough(fullname):
+            # Unrestricted passthrough modules: always import from the host
+            return spec_from_loader(
+                fullname,
+                _PreloadedLoader(_host_import(fullname)),
+                origin="sandbox",
+            )
+        return None
+
+    def _find_real_spec(
+        self,
+        fullname: str,
+        path: Sequence[str] | None,
+        target: types.ModuleType | None,
+    ) -> ModuleSpec | None:
+        """Ask the remaining finders for a spec in the host import context.
+
+        Third-party finders may import their own support modules during spec
+        discovery. If those imports saw the sandbox module table, they could
+        re-enter this finder recursively. Only discovery runs against the host:
+        after the context variables are restored, ``_RestrictedLoader`` uses
+        the returned loader to execute the module inside the sandbox and then
+        applies its restrictions.
+        """
+        table_token = _sandbox_sys_modules.set(None)
+        sandbox_token = _in_sandbox.set(False)
+        try:
+            if self in sys.meta_path:
+                for finder in sys.meta_path[sys.meta_path.index(self) + 1 :]:
+                    if hasattr(finder, "find_spec"):
+                        spec = finder.find_spec(fullname, path, target)
+                        if spec is not None:
+                            return spec
+        finally:
+            _in_sandbox.reset(sandbox_token)
+            _sandbox_sys_modules.reset(table_token)
+        return None
+
+
+class _RestrictedLoader(Loader):
+    def __init__(self, real_spec: ModuleSpec, policy: _ModulePolicy) -> None:
+        self._real_spec = real_spec
+        self._policy = policy
+
+    def create_module(self, spec: ModuleSpec) -> types.ModuleType | None:
+        loader = self._real_spec.loader
+        if loader is not None and hasattr(loader, "create_module"):
+            return loader.create_module(self._real_spec)
+        return None
+
+    def exec_module(self, module: types.ModuleType) -> None:
+        loader = self._real_spec.loader
+        if loader is not None:
+            loader.exec_module(module)
+        proxy = sys.modules[module.__name__] = _ProxyModule(module, self._policy)
+        self._policy.post_exec(proxy=proxy, module=module)
+
+
+class _PreloadedLoader(Loader):
+    """A Loader that returns an already-loaded module."""
+
+    def __init__(self, module: types.ModuleType) -> None:
+        self._module = module
+
+    def create_module(self, spec: ModuleSpec) -> types.ModuleType:
+        return self._module
+
+    def exec_module(self, module: types.ModuleType) -> None:
+        # Module is already fully initialized — nothing to do.
+        pass
+
+
+class _DispatchingSysModules(MutableMapping[str, types.ModuleType]):
+    """Installed once as ``sys.modules``.
+
+    Every read/write dispatches to the current context's module table: a
+    sandbox's private dict while a sandbox is active in this context
+    (asyncio task or thread), or the real process table otherwise.
+    """
+
+    __slots__ = ()
+
+    @property
+    def _current(self) -> dict[str, types.ModuleType]:
+        table = _sandbox_sys_modules.get()
+        return _real_sys_modules if table is None else table
+
+    def __getitem__(self, key: str) -> types.ModuleType:
+        return self._current[key]
+
+    def __setitem__(self, key: str, value: types.ModuleType) -> None:
+        self._current[key] = value
+
+    def __delitem__(self, key: str) -> None:
+        del self._current[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._current)
+
+    def __len__(self) -> int:
+        return len(self._current)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._current
+
+    def __repr__(self) -> str:
+        where = "sandbox table" if _sandbox_sys_modules.get() is not None else "host"
+        return f"<dispatching sys.modules -> {where} ({len(self._current)} modules)>"
+
+    # dict-only methods the import system / inspect call on sys.modules but
+    # which MutableMapping does not provide.
+    def copy(self) -> dict[str, types.ModuleType]:
+        return self._current.copy()
+
+    def __or__(self, other: Any) -> dict[str, types.ModuleType]:
+        return self._current | other
+
+    def __ror__(self, other: Any) -> dict[str, types.ModuleType]:
+        return other | self._current
+
+    def __ior__(self, other: Any) -> _DispatchingSysModules:
+        self._current.update(other)
+        return self
+
+    @classmethod
+    def fromkeys(cls, *args: Any, **kwargs: Any) -> dict[str, types.ModuleType]:
+        return dict.fromkeys(*args, **kwargs)
+
+
+def _install_linecache_patch() -> None:
+    """Make ``traceback.format_exc()`` work inside the sandbox, permanently.
+
+    Python 3.14 moved linecache's ``os``/``tokenize`` imports into function
+    bodies (lazy imports for startup perf).  Inside the sandbox those ``import``
+    statements resolve through ``sys.modules`` and pick up restricted proxies.
+    We replace ``updatecache`` with a version that uses a captured host
+    ``open`` and ``checkcache`` with a no-op — but only while a sandbox is
+    active in this context, so non-workflow code is unaffected and the patch is
+    race-free (installed once, gated on ``_in_sandbox``).
+    """
+    import linecache
+
+    host_open = open
+    cache = linecache.cache
+    orig_updatecache = linecache.updatecache
+    orig_checkcache = linecache.checkcache
+
+    def updatecache(filename: str, module_globals: Any = None) -> list[str]:
+        if not _in_sandbox.get(False):
+            return orig_updatecache(filename, module_globals)
+        if filename in cache:
+            del cache[filename]
+        try:
+            with host_open(filename, "rb") as f:
+                data = f.read()
+            lines = data.decode("utf-8", errors="replace").splitlines(True)
+        except OSError:
+            return []
+        cache[filename] = (len(data), 0, lines, filename)
+        return lines
+
+    def checkcache(filename: str | None = None) -> None:
+        if not _in_sandbox.get(False):
+            orig_checkcache(filename)
+        # Inside the sandbox: no-op — files don't change during a run.
+
+    linecache.updatecache = updatecache
+    linecache.checkcache = checkcache
+
+
+def _install_import_hook() -> None:
+    """Route ``import`` statements through a pure Python importer while sandboxed.
+
+    builtins.__import__ directly uses the interpreter-level modules
+    dict, which is not overridden when sys.modules is changed.
+
+    importlib has its own pure-Python reimplementation of __import__
+    that *does* use sys.modules, so we redirect to that when in a
+    sandbox.
+    """
+    real_import = builtins.__import__
+
+    def _sandbox_import(
+        name: str,
+        globals: Mapping[str, object] | None = None,
+        locals: Mapping[str, object] | None = None,
+        fromlist: Sequence[str] | None = (),
+        level: int = 0,
+    ) -> types.ModuleType:
+        if not _in_sandbox.get(False):
+            return real_import(name, globals, locals, fromlist or (), level)
+        table = _sandbox_sys_modules.get()
+        if level == 0 and table is not None and name in table:
+            module = table[name]
+            if fromlist and all(item == "*" or hasattr(module, item) for item in fromlist):
+                return module
+            if not fromlist:
+                top_level = table.get(name.partition(".")[0])
+                if top_level is not None:
+                    return top_level
+        return importlib.__import__(name, globals, locals, fromlist or (), level)
+
+    builtins.__import__ = _sandbox_import
+
+
+_install_lock = threading.Lock()
+_installed = False
+
+
+def _ensure_installed() -> None:
+    """Install the dispatching ``sys.modules`` and the sandbox finder once.
+
+    Both are permanent and inert outside a sandbox context, so there is no
+    per-run mutation of any shared global to race on.
+    """
+    global _installed
+    if _installed:
+        return
+    with _install_lock:
+        if _installed:
+            return
+        finder = _SandboxFinder(
+            host_modules=_real_sys_modules,
+            passthrough=_PASSTHROUGHS,
+            restrictions={k: v for k, v in _RESTRICTIONS.items() if k != "builtins"},
+            blocked=_BLOCKED,
+        )
+        sys.meta_path.insert(0, finder)
+        _install_linecache_patch()
+        _install_import_hook()
+        sys.modules = _DispatchingSysModules()  # type: ignore[assignment]
+        _installed = True
+
+
+def _new_sandbox_table() -> dict[str, types.ModuleType]:
+    """A fresh per-run module table seeded with the bootstrap essentials.
+
+    Everything else is served on demand by ``_SandboxFinder`` (passthrough
+    from the host, a restricted proxy, or a fresh re-import into this table).
+    """
+    _ensure_installed()
+
+    table: dict[str, types.ModuleType] = {
+        "sys": sys,
+        # Python 3.13+'s frozen zipimport imports struct lazily while probing
+        # ZIP64 entries. Windows console-script executables are zip candidates,
+        # so resolving struct through the sandbox finder can recursively probe
+        # the same executable before zipimport has cached its directory.
+        "struct": struct,
+        # os.py normally installs this alias while it initializes. The sandbox
+        # wraps the initialized host module, so copy its host-native path alias
+        # into every fresh module table.
+        "os.path": os.path,
+    }
+    # Snapshot atomically (list() over the view is a single C op) so a
+    # concurrent import in another thread can't trip "dict changed size".
+    for key, mod in list(_real_sys_modules.items()):
+        if key == "importlib" or key.startswith("importlib."):
+            table[key] = mod
+    builtins_policy = _RESTRICTIONS.get("builtins")
+    if builtins_policy is not None:
+        table["builtins"] = _ProxyModule(
+            _real_sys_modules["builtins"], builtins_policy, copy_dict=True
+        )
+    else:
+        table["builtins"] = _real_sys_modules["builtins"]
+    return table
+
+
+@dataclasses.dataclass(frozen=True)
+class SandboxCleanupContext:
+    """Handed to each cleanup handler when a sandbox exits."""
+
+    run_modules: Mapping[str, types.ModuleType]
+    """Snapshot of the sandbox's module table at exit.
+
+    Values include host-shared (passthrough) modules, not just modules
+    imported freshly into the sandbox.  Lets a handler evict host-cache
+    entries that reference the sandbox's objects instead of clearing a
+    whole cache.
+    """
+
+
+CleanupHandler = Callable[[SandboxCleanupContext], None]
+
+
+def clear_typing_caches(context: SandboxCleanupContext) -> None:
+    """Clear ``typing``'s module-level lru_caches.
+
+    ``typing`` is passthrough, and subscriptions like ``List[X]`` are
+    memoized in its module-level lru_caches.  When workflow code (or
+    pydantic, processing annotations) subscripts a generic with a
+    sandbox-defined class, the cache pins that class — and through its
+    functions' ``__globals__``, the run's entire module graph — until LRU
+    eviction, accumulating up to ~128 dead runs.  ``typing._cleanups``
+    holds the ``cache_clear`` functions for those caches; it is private
+    but long-stable (CPython's own tests rely on it).
+    """
+    for cleanup in getattr(typing, "_cleanups", ()):
+        cleanup()
+
+
+def clear_pydantic_generics_cache(context: SandboxCleanupContext) -> None:
+    """Clear pydantic's generic-parametrization cache.
+
+    The cache is a ``WeakValueDictionary``, but its keys strongly
+    reference the parametrizing classes.  When the parametrized model is
+    reachable from those classes' module globals (the typical case:
+    ``Alias = Gen[Param]``), the key → class → ``__globals__`` → value
+    path keeps the value alive through the cache itself, so entries
+    never self-evict — unbounded growth per run.
+    """
+    generics = _real_sys_modules.get("pydantic._internal._generics")
+    if generics is not None:
+        cache = getattr(generics, "_GENERIC_TYPES_CACHE", None)
+        if cache is not None:
+            cache.clear()
+
+
+ALL_CLEANUPS: tuple[CleanupHandler, ...] = (
+    clear_typing_caches,
+    clear_pydantic_generics_cache,
+)
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class SandboxPolicy:
+    """Configuration for the workflow sandbox, passed to ``Workflows``.
+
+    ``passthrough_modules`` are extra modules — each name covering its
+    submodules too — served from the host instead of re-imported per
+    run, in addition to the built-in passthrough set.  Use for large or
+    stateful modules that are safe to share; nothing checks them for
+    nondeterminism, and their state is shared with the host and every
+    concurrent run.
+
+    ``share_sandboxes`` indicates whether sandboxes can be reused for
+    multiple runs (including concurrent ones), or whether a
+    fresh one is created for each invocation. Shared sandboxes can
+    observe modifications made to globals by other runs, but are
+    much faster to launch.  Default is false, but this will change.
+
+    ``cleanups`` are run on the host, in order, after every sandbox
+    teardown; they exist to purge host-shared caches that would
+    otherwise pin the run's module graph (see :data:`ALL_CLEANUPS`).
+    A handler that raises is logged and skipped, and never masks the
+    workflow's own exception.  Handlers must be thread-safe: other runs
+    may be executing concurrently.
+    These are *not* run when share_sandboxes=True.
+    """
+
+    passthrough_modules: frozenset[str] = frozenset()
+    share_sandboxes: bool = False
+    cleanups: tuple[CleanupHandler, ...] = ()
+
+
+class Sandbox:
+    def __init__(self, *, policy: SandboxPolicy | None = None, run_cleanups: bool = True) -> None:
+        if policy is None:
+            policy = SandboxPolicy()
+
+        self.policy = policy
+        self.table = _new_sandbox_table()
+        self.run_cleanups = run_cleanups
+
+        self.import_lock = threading.Lock()
+
+        # Imported here rather than at module scope: `serde` is a leaf, but this
+        # module is imported by `core` before the rest of the package exists.
+        from . import serde
+
+        self.serde_registry = serde.Registry()
+        # In-context, so the classes registered are the sandbox's own -- its
+        # re-imported `uuid.UUID`, the proxied `datetime`'s `_RestrictedDate`.
+        with self._activate():
+            serde._register_builtins(self.serde_registry)
+
+    def cleanup(self) -> None:
+        context = SandboxCleanupContext(run_modules=dict(self.table))
+        for handler in self.policy.cleanups:
+            try:
+                handler(context)
+            except Exception:
+                logger.exception("sandbox cleanup handler %r failed", handler)
+
+    @contextmanager
+    def _activate(self) -> Iterator[None]:
+        """Mark this context in-sandbox, on this sandbox's module table."""
+        table_token = _sandbox_sys_modules.set(self.table)
+        sandbox_token = _in_sandbox.set(True)
+        passthrough_token = _policy_passthroughs.set(frozenset(self.policy.passthrough_modules))
+        try:
+            yield
+        finally:
+            _policy_passthroughs.reset(passthrough_token)
+            _in_sandbox.reset(sandbox_token)
+            _sandbox_sys_modules.reset(table_token)
+
+    @contextmanager
+    def enter(self) -> Iterator[None]:
+        """Activate the workflow sandbox for the current context.
+
+        Gives this context its own private ``sys.modules`` table, its own
+        serializable-class registrations, and marks it as in-sandbox so proxy
+        modules enforce restrictions. All are ContextVars, so concurrent runs
+        using different sandboxes are isolated without touching any shared global.
+        """
+        # Imported here rather than at module scope: `serde` is a leaf, but this
+        # module is imported by `core` before the rest of the package exists.
+        from . import serde
+
+        try:
+            with (
+                self._activate(),
+                serde.sandboxed_registrations(self.serde_registry),
+            ):
+                yield
+        finally:
+            if self.run_cleanups:
+                self.cleanup()
+
+
+def in_sandbox() -> bool:
+    return _in_sandbox.get()

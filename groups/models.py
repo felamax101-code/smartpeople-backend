@@ -4,6 +4,7 @@ from django.contrib.auth import get_user_model
 import uuid
 User = get_user_model()
 from feed.models import generate_post_slug
+from cloudinary_storage.storage import VideoMediaCloudinaryStorage
 
 class Community(models.Model):
     """The group itself"""
@@ -151,7 +152,7 @@ class CommunityPost(models.Model):
     sponsored=models.BooleanField(default=False)
     created_at=models.DateTimeField(auto_now_add=True)
     updated_at=models.DateTimeField(auto_now=True)
-    
+    client_upload_id = models.UUIDField(unique=True, null=True, blank=True, db_index=True)
     is_active=models.BooleanField(default=True)
     
     
@@ -270,7 +271,12 @@ class CommunityPostVideo(models.Model):
     id=models.UUIDField(primary_key=True,default=uuid.uuid4,editable=False)
     post=models.ForeignKey(CommunityPost,on_delete=models.CASCADE,related_name="videos")
     owner=models.ForeignKey(User,on_delete=models.CASCADE,related_name="community_videos")
-    video=models.FileField(upload_to="posts/videos/")
+    video=models.FileField(storage=VideoMediaCloudinaryStorage(),blank=True, null=True,upload_to="posts/videos/")
+    processing_status = models.CharField(
+        max_length=10,
+        choices=[("processing", "Processing"), ("done", "Done"), ("failed", "Failed")],
+        default="processing",
+    )
     created_at=models.DateTimeField(auto_now_add=True)
     updated_at=models.DateTimeField(auto_now=True)
     order=models.PositiveIntegerField(default=0)

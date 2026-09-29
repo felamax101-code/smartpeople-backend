@@ -1,5 +1,8 @@
 from rest_framework.views import APIView
+from rest_framework.parsers import MultiPartParser, FormParser
+
 from rest_framework.response import Response
+from .utils import validate_image_file
 from rest_framework import status
 from django.shortcuts import get_object_or_404
 from channels.layers import get_channel_layer
@@ -153,7 +156,7 @@ class ConversationMessagesView(APIView):
                 readers_map.setdefault(str(r.message_id), []).append({
                     "user_id": str(r.user_id),
                     "username": r.user.username,
-                    "avatar": r.user.avatar,
+                    "avatar": _absolute_url(request,r.user.avatar) if r.user.avatar else None,
                     "read_at": r.read_at.isoformat(),
                 })
         reactions_map = {
@@ -339,7 +342,7 @@ class MessageReadView(APIView):
             {
                 "user_id": str(r.user_id),
                 "username": r.user.username,
-                "avatar": r.user.avatar,
+                "avatar": _absolute_url(request,r.user.avatar) if r.user.avatar else None,
                 "read_at": r.read_at.isoformat(),
             }
             for r in MessageRead.objects.filter(message=message).select_related("user").order_by("read_at")
@@ -505,7 +508,7 @@ class GroupMembersView(APIView):
         return Response([
             {
                 "id": str(r.user.id), "username": r.user.username,
-                "avatar": r.user.avatar, "is_admin": r.is_admin,
+                "avatar": _absolute_url(request,r.user.avatar) if r.user.avatar else None, "is_admin": r.is_admin,
                 "joined_at": r.joined_at.isoformat() if r.joined_at else None,
             }
             for r in rows
@@ -619,8 +622,9 @@ def _remove_member(request, conversation_id, target_user_id, allow_self_leave):
     return Response({"success": True})
 
 
+
 class GroupSettingsView(APIView):
-    """PATCH /conversations/groups/<conversation_id>/ — rename/change avatar, admin only"""
+    parser_classes = [MultiPartParser, FormParser]  # now accepts multipart, not just JSON
 
     def patch(self, request, conversation_id):
         is_admin = ConversationParticipant.objects.filter(
@@ -632,24 +636,28 @@ class GroupSettingsView(APIView):
         conversation = get_object_or_404(Conversation, id=conversation_id, is_group=True)
 
         group_name = request.data.get("group_name")
-        group_avatar = request.data.get("group_avatar")
+        group_avatar = request.FILES.get("group_avatar")  # file now comes from FILES, not data
+
         if group_name is None and group_avatar is None:
             return Response({"detail": "Provide at least group_name or group_avatar"}, status=400)
 
         if group_name is not None:
             conversation.group_name = group_name.strip()
+
         if group_avatar is not None:
+            error = validate_image_file(group_avatar)
+            if error:
+                return Response({"detail": error}, status=400)
+
+            # Assign the UploadedFile directly. ImageField handles storage.save()
+            # itself on conversation.save(), storing a relative path in `name`.
+            # Never assign a pre-built URL string here.
             conversation.group_avatar = group_avatar
+
         conversation.save()
 
-        _broadcast(conversation_id, "group_updated", {
-            "conversation_id": str(conversation_id),
-            "group_name": conversation.group_name,
-            "group_avatar": str(conversation.group_avatar) if conversation.group_avatar else None,
-            "updated_by": str(request.user.id),
-        })
-        return Response(ConversationSerializer(conversation, context={"request": request}).data)
-
+        serializer = ConversationSerializer(conversation, context={"request": request})
+        return Response(serializer.data, status=200)
 
 def _notify_user(user_id, event_type, data):
     """Personal channel push — same role as user_channel() in your Redis code."""
@@ -732,7 +740,7 @@ class UserSearchView(APIView):
         all_users = [u for u in all_users if u.id not in blocked_ids]
 
         return Response([
-            {"id": str(u.id), "username": u.username, "avatar": u.avatar if u.avatar else None}
+            {"id": str(u.id), "username": u.username, "avatar": request.build_absolute_uri(u.avatar.url) if u.avatar else None}
             for u in all_users
         ])
 from feed.models import MessageReaction

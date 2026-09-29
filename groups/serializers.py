@@ -3,7 +3,8 @@ from .models import (Community,Membership,CommunityCategoryPost,CommunityPost,
                      CommunityPostComment,CommunityCommentUpvote,CommunityCommentDownvote,
                      CommunityJoinRequest,CommunitySavedPost,CommunityInvites)
 from feed.models import SavedPost
-
+from feed.utils import save_temp_upload
+from .tasks import transcode_and_attach_video
 from rest_framework import serializers
 
 from django.contrib.auth import get_user_model
@@ -17,7 +18,7 @@ class CommunityInfoSerializer(serializers.ModelSerializer):
     cover_image=serializers.SerializerMethodField()
     class Meta:
         model=Community
-        fields=["id","name","description","cover_image","rules","members_count"]
+        fields=["id","name","description","cover_image","rules","members_count","privacy"]
     def get_cover_image(self,obj):
         request=self.context.get("request")
         if not request:
@@ -186,9 +187,11 @@ class PostSerializer(serializers.ModelSerializer):
 
         if media_type == "video":
             for index, file in enumerate(media_files):
-                CommunityPostVideo.objects.create(
-                    owner=user, post=post, video=file, is_cover=(index == 0)
-                )
+                post_video = CommunityPostVideo.objects.create(
+            owner=user, post=post, is_cover=(index == 0)
+        )
+                tmp_path = save_temp_upload(file, post_video.id)
+                transcode_and_attach_video.delay(str(post_video.id), tmp_path)
         elif media_type == "photo":
             for index, file in enumerate(media_files):
                 CommunityPostImage.objects.create(

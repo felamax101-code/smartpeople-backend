@@ -1,4 +1,5 @@
 from django.shortcuts import render
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
 from .permissions import IsAdminOrStaff
@@ -8,7 +9,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Q, Value, IntegerField, Case, When
 from authentication.models import Follow
-from .models import PostViews,Post,Comment,PostUpvote,CommentDownvote,CommentUpvote,Category,Review,SavedPost,PostRepost
+from .models import PostVideo,PostViews,Post,Comment,PostUpvote,CommentDownvote,CommentUpvote,Category,Review,SavedPost,PostRepost
 from .serializers import (PostSerializer,PostListSerializer,CommentSerializer,CommentCreateSerializer,
                           CategorySerializer,ReviewSerializer,OwnPostListSerializer,CommentEditSerializer,
                           PostReportSerializer,SavedPostSerializer,SearchUsersSerializer)
@@ -17,6 +18,27 @@ from .geo import annotate_distance
 from django.db.models import Q
 from django.contrib.auth import get_user_model
 User=get_user_model()
+# views.py, temporary
+from sp.celery import app as celery_app
+from .throttles import VideoStatusThrottle
+def debug_celery_view(request):
+    celery_app.send_task("sp.celery.debug_task")
+    return HttpResponse("Task sent")
+# polling upload status
+class PostVideoStatusView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [VideoStatusThrottle]
+    def get(self, request, video_id):
+        try:
+            pv = PostVideo.objects.get(id=video_id)
+        except PostVideo.DoesNotExist:
+            return Response({"error": "not found"}, status=404)
+        return Response({
+            "id": pv.id,
+            "status": pv.processing_status,
+            "url": pv.video.url if pv.video else None,
+        })
+
 class ProfileApprovalView(APIView):
     permission_classes=[IsAdminOrStaff]
     def get (self,request):
@@ -281,12 +303,20 @@ class PostCreateView(APIView):
             return Response({
                 "error":"Post requested does not exist"
             },status=400)
-    def post(self,request):
-        serializer=PostSerializer(data=request.data,context={'request':request})
+    def post(self, request):
+        client_upload_id = request.data.get("client_upload_id")
+        if client_upload_id:
+            existing = Post.objects.filter(client_upload_id=client_upload_id).first()
+            if existing:
+                # this exact submission already succeeded — hand back its current
+                # state instead of creating a duplicate post + duplicate transcode job
+                return Response(PostSerializer(existing, context={"request": request}).data, status=200)
+
+        serializer = PostSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             serializer.save()
-            return Response(serializer.data,status=201)
-        return Response(serializer.errors,status=400)
+            return Response(serializer.data, status=201)
+        return Response(serializer.errors, status=400)
     def put(self,request,slug):
         user=request.user
         try:

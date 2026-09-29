@@ -1,0 +1,330 @@
+"""Payload encoding for workflow runs, steps and hooks.
+
+The wire format is the one `@workflow/core` defines in
+`src/serialization-format.ts`: a 4-byte ASCII format tag followed by the
+payload. Values begin as ``devl`` — UTF-8 `devalue.stringify` output — and
+large values may then be wrapped in ``gzip`` or ``zstd``. Both forms parse in
+JavaScript and Python.
+
+``encr`` — an encrypted payload — and ``encp`` — one sealed to the run's public
+key — are read too.
+
+`gzip`/`zstd` wrap another prefixed payload. Writes use them only for runs that
+advertise spec version 5 or newer; reads decompress them before decoding the
+inner format.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from vercel.workflow._internal import devalue
+
+from . import compression, encryption, error_serde, errors, serde
+
+FORMAT_PREFIX_LENGTH = 4
+
+DEVALUE_V1 = b"devl"
+"""`devalue.stringify` output, UTF-8 encoded."""
+
+ENCRYPTED = b"encr"
+"""Symmetrically encrypted; the plaintext carries its own format prefix."""
+
+SEALED = b"encp"
+"""Sealed to a run's X25519 public key; likewise prefixed once opened."""
+
+GZIP = b"gzip"
+ZSTD = b"zstd"
+
+ENCRYPTED_FORMATS = (ENCRYPTED, SEALED)
+"""The formats that need the run's key material. Both derive from the same 32 bytes."""
+
+
+class SerializationError(errors.FatalError):
+    """A payload could not be encoded, or arrived in a format we cannot read."""
+
+
+def _reduce_writable_stream(value: Any) -> Any:
+    """devalue reducer for a run's stream. Falsy declines the value.
+
+    Rides `@workflow/core`'s own ``WritableStream`` tag rather than the
+    ``Instance`` rail :mod:`.serde` uses for new types, because a stream is not
+    a new type: the TypeScript SDK already defines this tag and revives it into
+    a real `WritableStream` against the same ``(runId, name)``. A Python
+    workflow can therefore hand one of its streams to a JavaScript peer.
+    """
+    from . import streams
+
+    if isinstance(value, streams.WorkflowStreamHandle | streams.WorkflowStreamWriter):
+        return {"name": value.name, "runId": value.run_id}
+    return False
+
+
+def _revive_writable_stream(value: Any) -> Any:
+    """devalue reviver for the ``WritableStream`` tag."""
+    from . import runtime
+
+    if not isinstance(value, dict) or not isinstance(value.get("name"), str):
+        raise ValueError(f"malformed WritableStream payload: {value!r}")
+    run_id = value.get("runId")
+    return runtime.open_writable(run_id if isinstance(run_id, str) else None, value["name"])
+
+
+# Instance must precede the error reducers so registered exception classes keep
+# their custom serialization. Streams do not overlap either group.
+REDUCERS: dict[str, Any] = {
+    **serde.REDUCERS,
+    **error_serde.REDUCERS,
+    "WritableStream": _reduce_writable_stream,
+}
+REVIVERS: dict[str, Any] = {
+    **serde.REVIVERS,
+    **error_serde.REVIVERS,
+    "WritableStream": _revive_writable_stream,
+}
+
+
+def _encode_devalue(value: Any) -> bytes:
+    try:
+        return DEVALUE_V1 + devalue.stringify(value, REDUCERS).encode()
+    except devalue.DevalueError as error:
+        at = f" at {error.path}" if error.path else ""
+        raise SerializationError(
+            f"Cannot serialize value{at}: {error}.{serde.registration_hint(error.value)}"
+        ) from error
+    except (ValueError, TypeError) as error:
+        # A registered serializer failed. `serde` has already named the class,
+        # so this only puts the codec-level frame behind a typed error.
+        raise SerializationError(f"Cannot serialize value: {error}") from error
+
+
+@dataclass(frozen=True, slots=True)
+class PayloadEncoder:
+    """Encode workflow payload values and errors."""
+
+    compression: bool = False
+    encryption_key: bytes | None = None
+    recipient_public_key: bytes | None = None
+
+    def __post_init__(self) -> None:
+        if self.encryption_key is not None and self.recipient_public_key is not None:
+            raise ValueError("A payload encoder cannot both encrypt and seal")
+
+    def encode(self, value: Any) -> bytes:
+        return self._wrap(_encode_devalue(value))
+
+    def encode_error(self, error: Exception) -> bytes:
+        """Encode an error, falling back to a serializable summary."""
+        try:
+            encoded = _encode_devalue(error)
+        except Exception as encode_error:
+            name = type(error).__name__
+            encoded = _encode_devalue(
+                errors.RemoteError(f"{name} could not be serialized: {encode_error}", name=name)
+            )
+        return self._wrap(encoded)
+
+    def _wrap(self, encoded: bytes) -> bytes:
+        encoded = compression.maybe_compress(encoded, enabled=self.compression)
+        if self.recipient_public_key is not None:
+            return SEALED + encryption.seal_envelope(self.recipient_public_key, encoded)
+        if self.encryption_key is not None:
+            return ENCRYPTED + encryption.encrypt_envelope(self.encryption_key, encoded)
+        return encoded
+
+
+def hydrate_error(data: Any, *, what: str, key: bytes | None = None) -> Exception:
+    """Decode an error payload as something Python can raise.
+
+    String and ``{message, stack, code}`` values are accepted for runs written
+    by Python SDK versions that predate serialized errors.
+    """
+    if isinstance(data, str):
+        return RuntimeError(data)
+    if isinstance(data, dict) and "message" in data:
+        payload = {
+            "name": data.get("name") or data.get("code") or "RuntimeError",
+            "message": data["message"],
+        }
+        if "stack" in data:
+            payload["stack"] = data["stack"]
+        return error_serde.as_exception(error_serde.revive_error(payload))
+    return error_serde.as_exception(hydrate(data, what=what, key=key))
+
+
+def is_encrypted(data: Any) -> bool:
+    """Whether reading *data* would need the run's key.
+
+    Lets a caller skip resolving a key it does not need, which can cost an API
+    call. Takes ``Any`` for the same reason :func:`hydrate` does, and answers
+    ``False`` for anything that is not a payload at all.
+    """
+    if not isinstance(data, bytes | bytearray | memoryview):
+        return False
+    return bytes(data[:FORMAT_PREFIX_LENGTH]) in ENCRYPTED_FORMATS
+
+
+def payloads_equal(left: Any, right: Any, *, key: bytes | None) -> bool:
+    """Compare serialized payloads without treating fresh encryption nonces as data."""
+    if left == right:
+        return True
+    if key is None or not isinstance(left, bytes) or not isinstance(right, bytes):
+        return False
+
+    def plaintext(data: bytes) -> bytes:
+        prefix, payload = _decode_format(data, what="a payload")
+        if prefix == ENCRYPTED:
+            return encryption.open_envelope(key, payload)
+        if prefix == SEALED:
+            return encryption.open_sealed_envelope(key, payload)
+        return data
+
+    try:
+        return plaintext(left) == plaintext(right)
+    except (encryption.DecryptionError, SerializationError, ValueError):
+        return False
+
+
+def _decode_format(data: bytes, *, what: str) -> tuple[bytes, bytes]:
+    if len(data) < FORMAT_PREFIX_LENGTH:
+        raise SerializationError(f"{what} is too short to carry a format prefix: {len(data)} bytes")
+    return data[:FORMAT_PREFIX_LENGTH], data[FORMAT_PREFIX_LENGTH:]
+
+
+def hydrate(data: Any, *, what: str, key: bytes | None = None) -> Any:
+    """Decode a format-prefixed payload written by either SDK.
+
+    Takes ``Any`` because it is the boundary that checks: a payload field can
+    hold whatever the backend put there — an unresolved remote reference, or
+    the ``'[Circular]'`` marker a `run_created` response carries in place of
+    the input — and this is where that is turned into a readable error.
+
+    *what* names the payload in the error message — it is the only context
+    the caller has that would help someone reading the traceback.
+
+    *key* is the run's 32-byte key material, needed for an ``encr`` payload and
+    for an ``encp`` one, which derives its keypair from the same bytes;
+    :func:`is_encrypted` says in advance whether one will be asked for.
+    """
+    if not isinstance(data, bytes | bytearray | memoryview):
+        raise SerializationError(f"{what} is not serialized data: {type(data).__name__}")
+    data = bytes(data)
+    prefix, payload = _decode_format(data, what=what)
+    if prefix in ENCRYPTED_FORMATS:
+        if key is None:
+            raise SerializationError(
+                f"{what} is encrypted, and no key was resolved for the run that wrote it"
+                if prefix == ENCRYPTED
+                else f"{what} is sealed, and no key was resolved for the run it is addressed to"
+            )
+        try:
+            plaintext = (
+                encryption.open_envelope(key, payload)
+                if prefix == ENCRYPTED
+                else encryption.open_sealed_envelope(key, payload)
+            )
+        except (encryption.DecryptionError, ValueError) as error:
+            raise SerializationError(f"Cannot decrypt {what}: {error}") from error
+        prefix, payload = _decode_format(plaintext, what=what)
+    if prefix in (GZIP, ZSTD):
+        try:
+            decompressed = (
+                compression.decompress_gzip(payload)
+                if prefix == GZIP
+                else compression.decompress_zstd(payload)
+            )
+        except compression.DecompressionError as error:
+            raise SerializationError(f"Cannot decompress {what}: {error}") from error
+        prefix, payload = _decode_format(decompressed, what=what)
+    if prefix == DEVALUE_V1:
+        try:
+            return devalue.parse(payload.decode(), REVIVERS)
+        except (devalue.DevalueError, ValueError, TypeError) as error:
+            raise SerializationError(f"Cannot deserialize {what}: {error}") from error
+    raise SerializationError(f"{what} has an unknown serialization format: {prefix!r}")
+
+
+def _is_argument_object(value: Any) -> bool:
+    """Whether :func:`call_arguments` would read *value* as the kwargs object.
+
+    A dict with a non-string key cannot be a JavaScript object — it is a
+    devalue `Map`, so a positional argument. :class:`PayloadEncoder` refuses
+    to write one, so that case only arises reading a payload a JavaScript
+    caller wrote.
+    """
+    return isinstance(value, dict) and all(isinstance(key, str) for key in value)
+
+
+def argument_array(args: Sequence[Any], kwargs: Mapping[str, Any]) -> list[Any]:
+    """The argument array a call is recorded as.
+
+    `@workflow/core` records a call as the array of its positional arguments
+    and spreads it back into the callee (`workflowFn(...args)`). A Python call
+    also carries keyword arguments, and the array has one slot per value with
+    nowhere to name anything — so the keyword arguments ride in a single object
+    appended after the positional ones. Takes the two halves
+    `core._bind_arguments` produced, not a raw call:
+
+    ================  ==========================  ==========================
+    positional        keyword                     array
+    ================  ==========================  ==========================
+    ``()``            ``{}``                      ``[]``
+    ``(21,)``         ``{}``                      ``[21]``
+    ``()``            ``{"amount": 21}``          ``[{"amount": 21}]``
+    ``(21,)``         ``{"currency": "usd"}``     ``[21, {"currency": "usd"}]``
+    ``({"a": 1},)``   ``{}``                      ``[{"a": 1}, {}]``
+    ================  ==========================  ==========================
+
+    :func:`call_arguments` reads that back by taking a trailing object as the
+    keyword arguments. The one call that rule would misread is one whose last
+    *positional* argument is itself an object, so the encoder appends an empty
+    object in that case and the rule holds unconditionally. A JavaScript callee
+    receives one extra ``{}`` argument there, which is harmless.
+
+    Both ends of the table are what TypeScript writes for the same call:
+    ``[{"amount": 21}]`` is `start(wf, [{amount: 21}])`, the object argument a
+    JavaScript callee expects, and ``[]`` is the empty array TS writes for a
+    call with no arguments rather than an empty object a JavaScript callee
+    would receive as a stray parameter.
+    """
+    encoded = list(args)
+    if kwargs:
+        encoded.append(dict(kwargs))
+    elif encoded and _is_argument_object(encoded[-1]):
+        encoded.append({})
+    return encoded
+
+
+def call_arguments(args: Any, *, what: str) -> tuple[list[Any], dict[str, Any]]:
+    """Read an argument array back, the inverse of :func:`argument_array`.
+
+    Returns the positional arguments and the keyword arguments, to be splatted
+    into the workflow or step function. An array a JavaScript caller wrote
+    carries positional arguments only — except for the idiomatic single-object
+    call, which arrives as keyword arguments and so lands on a Python callee
+    declaring the matching parameters.
+    """
+    if not isinstance(args, list):
+        raise SerializationError(f"{what} is not an argument array: {type(args).__name__}")
+    if args and _is_argument_object(args[-1]):
+        return args[:-1], args[-1]
+    return args, {}
+
+
+def step_arguments(args: Sequence[Any], kwargs: Mapping[str, Any]) -> dict[str, Any]:
+    """The object `@workflow/core` records a *step* call as.
+
+    A step's arguments are wrapped where a workflow's are not. TS puts
+    ``closureVars`` and ``thisVal`` in the same object, neither of which has a
+    Python analogue; its reader defaults both when they are absent.
+    """
+    return {"args": argument_array(args, kwargs)}
+
+
+def step_call_arguments(data: Any, *, what: str) -> tuple[list[Any], dict[str, Any]]:
+    """Read a step's recorded call back, the inverse of :func:`step_arguments`."""
+    if not isinstance(data, dict):
+        raise SerializationError(f"{what} is not a step argument object: {type(data).__name__}")
+    return call_arguments(data.get("args"), what=what)

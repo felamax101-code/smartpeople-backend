@@ -5,6 +5,7 @@ User = get_user_model()
 from django.utils.text import slugify
 from django.utils import timezone
 from django.core.validators import FileExtensionValidator
+from cloudinary_storage.storage import VideoMediaCloudinaryStorage
 
 #helper functions
 def generate_post_slug(name):
@@ -54,7 +55,9 @@ class Post(models.Model):
         ("pending","Pending"),
         ("rejected","Rejected"),
     )
+	
     status=models.TextField(choices=STATUS,default="pending")
+    client_upload_id = models.UUIDField(unique=True, null=True, blank=True, db_index=True)
     rejection_reason=models.TextField(blank=True,null=True)
     sponsored=models.BooleanField(default=False)
     created_at=models.DateTimeField(auto_now_add=True)
@@ -190,11 +193,17 @@ class PostVideo(models.Model):
     id=models.UUIDField(primary_key=True,default=uuid.uuid4,editable=False)
     post=models.ForeignKey(Post,on_delete=models.CASCADE,related_name="videos")
     owner=models.ForeignKey(User,on_delete=models.CASCADE,related_name="videos")
-    video=models.FileField(upload_to="posts/videos/")
+    video=models.FileField(storage=VideoMediaCloudinaryStorage(),upload_to="posts/videos/",blank=True, null=True)
     created_at=models.DateTimeField(auto_now_add=True)
+
     updated_at=models.DateTimeField(auto_now=True)
     order=models.PositiveIntegerField(default=0)
     is_cover=models.BooleanField(default=False)
+    processing_status = models.CharField(
+        max_length=10,
+        choices=[("processing", "Processing"), ("done", "Done"), ("failed", "Failed")],
+        default="processing",
+    )
     class Meta:
         db_table = 'Post videos'
     def __str__(self):
@@ -363,7 +372,7 @@ class Message(models.Model):
     message_type = models.CharField(max_length=10, choices=MESSAGE_TYPES, default="text")
     body = models.TextField(null=True, blank=True)
     image_url = models.ImageField(upload_to="messages/images/",null=True, blank=True)
-    video_url = models.FileField(upload_to="messages/videos/",null=True, blank=True,validators=[FileExtensionValidator(allowed_extensions=["mp4", "mov", "avi", "webm"])],)
+    video_url = models.FileField(storage=VideoMediaCloudinaryStorage(),upload_to="messages/videos/",null=True, blank=True,validators=[FileExtensionValidator(allowed_extensions=["mp4", "mov", "avi", "webm"])],)
     offer_data = models.JSONField(null=True, blank=True)
     is_read = models.BooleanField(default=False)
     read_at = models.DateTimeField(null=True, blank=True)
@@ -520,4 +529,4 @@ class PostViews(models.Model):
     class Meta:
         unique_together=("post","user")
     def __str__(self):
-        return f"{user}:{post}"
+        return f"{self.user}:{self.post}"

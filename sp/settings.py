@@ -19,6 +19,107 @@ from datetime import timedelta
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+MEDIA_ROOT = BASE_DIR / "media"
+MEDIA_URL = "/media/"
+STORAGE_BACKEND = config("STORAGE_BACKEND", default="local")
+
+if STORAGE_BACKEND == "local":
+    MEDIA_ROOT = BASE_DIR / "media"
+    STORAGES = {
+        "default": {
+            "BACKEND": "django.core.files.storage.FileSystemStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+
+elif STORAGE_BACKEND == "s3":
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.s3boto3.S3Boto3Storage",
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+    AWS_ACCESS_KEY_ID = config("AWS_ACCESS_KEY_ID")
+    AWS_SECRET_ACCESS_KEY = config("AWS_SECRET_ACCESS_KEY")
+    AWS_STORAGE_BUCKET_NAME = config("AWS_BUCKET_NAME")
+    AWS_S3_REGION_NAME = config("AWS_REGION")
+    AWS_DEFAULT_ACL = "public-read"
+
+elif STORAGE_BACKEND == "cloudinary":
+    STORAGES = {
+        "default": {
+            "BACKEND": "cloudinary_storage.storage.MediaCloudinaryStorage",
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+    CLOUDINARY_STORAGE = {
+        "CLOUD_NAME": config("CLOUDINARY_CLOUD_NAME"),
+        "API_KEY": config("CLOUDINARY_API_KEY"),
+        "API_SECRET": config("CLOUDINARY_API_SECRET"),
+    }
+
+# Needed because django-cloudinary-storage's collectstatic command
+# still reads the old-style setting directly, even under Django 6.
+STATICFILES_STORAGE = STORAGES["staticfiles"]["BACKEND"]
+  
+
+
+JAZZMIN_SETTINGS = {
+    "site_title": "My Project Admin",
+    "site_header": "Project Name",
+    "site_brand": "Admin Panel",
+    "welcome_sign": "Welcome to the Project Management System",
+    "copyright": "Acme Ltd",
+    "search_model": ["auth.User", "auth.Group"],
+    "show_sidebar": True,
+    "navigation_expanded": True,
+    "order_with_respect_to": ["auth", "books", "orders"], # App labels
+    "icons": {
+        "auth": "fas fa-users-cog",
+        "auth.user": "fas fa-user",
+        "auth.Group": "fas fa-users",
+    },
+    "default_icon_parents": "fas fa-chevron-circle-right",
+    "default_icon_children": "fas fa-circle",
+}
+
+JAZZMIN_UI_TWEAKS = {
+    "navbar_small_text": False,
+    "footer_small_text": False,
+    "body_small_text": False,
+    "brand_small_text": False,
+    "brand_colour": "navbar-primary",
+    "accent": "accent-primary",
+    "navbar": "navbar-white navbar-light",
+    "no_navbar_border": False,
+    "navbar_fixed": False,
+    "layout_boxed": False,
+    "footer_fixed": False,
+    "sidebar_fixed": False,
+    "sidebar": "sidebar-dark-primary",
+    "sidebar_nav_small_text": False,
+    "sidebar_disable_expand": False,
+    "sidebar_nav_child_indent": False,
+    "sidebar_nav_compact_style": False,
+    "sidebar_hover_elevate": False,
+    "sidebar_activate_nav_legacy_style": False,
+    "theme": "default",
+    "dark_mode_theme": None,
+    "button_classes": {
+        "primary": "btn-primary",
+        "secondary": "btn-secondary",
+        "info": "btn-info",
+        "warning": "btn-warning",
+        "danger": "btn-danger",
+        "success": "btn-success"
+    }
+}
 
 
 REST_FRAMEWORK = {
@@ -32,14 +133,15 @@ REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 10,
     
-    # "DEFAULT_THROTTLE_CLASSES":[
-    #     "rest_framework.throttling.AnonRateThrottle",
-    #     "rest_framework.throttling.UserRateThrottle",
-    # ],
-    # "DEFAULT_THROTTLE_RATES":{
-    #     "anon":"100/hour",
-    #     "user":"1000/hour"
-    # },
+     "DEFAULT_THROTTLE_CLASSES":[
+         "rest_framework.throttling.AnonRateThrottle",
+         "rest_framework.throttling.UserRateThrottle",
+     ],
+     "DEFAULT_THROTTLE_RATES":{
+         "anon":"100/hour",
+         "user":"1000/hour",
+	"video_status": "40/min"
+     },
     
     'EXCEPTION_HANDLER': 'authentication.exceptions.custom_exception_handler',
 }
@@ -56,8 +158,9 @@ SECRET_KEY = 'django-insecure-q^p2d6jx12f(95hlp$6##6jj(f2$-#a-si=$+p8y1ge2cz#a4l
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
-
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='').split(',')
+CORS_ALLOWED_ORIGINS= config('CORS_ALLOWED_ORIGINS', default='').split(',')
+CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS", default="").split(',')
 REPORT_THRESHOLDS = {
     3: "flagged",
     10: "suspended",
@@ -193,11 +296,22 @@ STATIC_URL = 'static/'
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
 
-EMAIL_BACKEND="django.core.mail.backends.console.EmailBackend"
+EMAIL_BACKEND = config("EMAIL_BACKEND", default="django.core.mail.backends.smtp.EmailBackend")
+EMAIL_HOST = config("EMAIL_HOST", default="smtp-relay.brevo.com")
+EMAIL_PORT = config("EMAIL_PORT", default=587, cast=int)
+EMAIL_USE_TLS = config("EMAIL_USE_TLS", default=True, cast=bool)
+EMAIL_HOST_USER = config("EMAIL_HOST_USER", default=config("BREVO_SMTP_LOGIN", default=""))
+EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD", default=config("BREVO_SMTP_KEY", default=""))
+DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL")
 
 
-MAILERS = {
-    'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
-    },
-}
+
+
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+CELERY_BROKER_URL = "redis://localhost:6379/0"
+CELERY_RESULT_BACKEND = "redis://localhost:6379/0"
+CELERY_ACCEPT_CONTENT = ["json"]
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_TIMEZONE = "Africa/Nairobi"  # match this to your actual TIME_ZONE setting

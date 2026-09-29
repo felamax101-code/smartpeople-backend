@@ -23,10 +23,23 @@ from.serializers import (
     PendingJoiRequestsSerializer,CreateGroupSerializer,MySentRequestSerializer,MyInvitesSerializer,SearchUsersForRoleAssignmentSerializer
 )
 from rest_framework.parsers import MultiPartParser
-
+from feed.throttles import VideoStatusThrottle
 from authentication.notification_service import notify
 
-
+# polling upload status
+class PostVideoStatusView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [VideoStatusThrottle]
+    def get(self, request, video_id):
+        try:
+            pv = CommunityPostVideo.objects.get(id=video_id)
+        except CommunityPostVideo.DoesNotExist:
+            return Response({"error": "not found"}, status=404)
+        return Response({
+            "id": pv.id,
+            "status": pv.processing_status,
+            "url": pv.video.url if pv.video else None,
+        })
 class ProfileApprovalView(APIView):
     permission_classes=[IsAdminOrStaff]
     def get (self,request):
@@ -374,7 +387,6 @@ class JoinCommunityView(APIView):
         
         already_memmber=Membership.objects.filter(user=request.user,community=community).first()
         if already_memmber:
-            already_memmber.delete()
             return Response({
                 "message":"success"
             },status=200)
@@ -388,6 +400,24 @@ class JoinCommunityView(APIView):
             data={"slug": community.slug},
             send_push=True,
         )
+            return Response({
+                "message":"success"
+            },status=200)
+    def delete(self,request,slug):
+        slug=request.query_params.get("slug")
+        try:
+            community=Community.objects.get(slug=slug)
+        except Community.DoesNotExist:
+            return Response({
+                "error":"The community requested does not exist"
+            },status=400)
+        already_memmber=Membership.objects.filter(user=request.user,community=community).first()
+        if already_memmber:
+            already_memmber.delete()
+            return Response({
+                "message":"success"
+            },status=200)
+        else:
             return Response({
                 "message":"success"
             },status=200)
@@ -478,10 +508,17 @@ class CommentReplyView(APIView):
     def post(self, request, slug, comment_id):
         try:
             # always find the top-level parent
-            comment = CommunityPostComment.objects.get(id=comment_id, post__slug=slug)
+            parent = CommunityPostComment.objects.get(id=comment_id, post__slug=slug)
         except CommunityPostComment.DoesNotExist:
             return Response({"error": "Comment not found"}, status=404)
-
+        replied_to_comment_id=request.data.get("replied_to_comment_id")
+        replied_to_comment=None
+        if replied_to_comment_id:
+            try:
+            #  find the actual comment being replied to
+                replied_to_comment = CommunityPostComment.objects.get(id=replied_to_comment_id,parent=parent, is_deleted=False)
+            except CommunityPostComment.DoesNotExist:
+                replied_to_comment=None
         body = request.data.get("body", "").strip()
         reply_to_id = request.data.get("reply_to_id")  # optional - who they're replying to
 
@@ -493,14 +530,14 @@ class CommentReplyView(APIView):
 
         # if comment is itself a reply, parent is its parent (keep flat)
         # if comment is top-level, parent is the comment itself
-        parent = comment.parent if comment.parent else comment
-        reply_to=User.objects.get(id=reply_to_id)
+        
         reply = CommunityPostComment.objects.create(
-            post=comment.post,
+            post=parent.post,
             author=request.user,
             body=body,
             parent=parent,
-            reply_to=reply_to,
+            replied_to=replied_to_comment,
+            reply_to=replied_to_comment.author if replied_to_comment else parent.author,
         )
 
         serializer = CommentSerializer(reply, context={"request": request})
@@ -529,7 +566,20 @@ class CommentRepliesView(APIView):
         paginator.page_size = 100  # 100 replies per load
         page = paginator.paginate_queryset(replies, request)
         serializer = CommentSerializer(page, many=True, context={"request": request})
-        return paginator.get_paginated_response(serializer.data)
+        return Response({
+            "success": True,
+            "data": {
+                "comments": serializer.data,
+                "pagination": {
+                    "page": paginator.page.number,
+                    "page_size": paginator.get_page_size(request),
+                    "total": paginator.page.paginator.count,
+                    "total_pages": paginator.page.paginator.num_pages,
+                    "has_next": paginator.page.has_next(),
+                    "has_prev": paginator.page.has_previous(),
+                }
+            }
+        }, status=status.HTTP_200_OK)
 
 
 class CommentVoteView(APIView):
@@ -1180,6 +1230,7 @@ class CreateGroupView(APIView):
         serializer=CreateGroupSerializer(data=request.data,context={"request":request})
         if serializer.is_valid():
             c=serializer.save()
+            CommunityCategoryPost.objects.create(name="General",community=community)
             return Response({
                 "slug":c.slug
             },status=200)

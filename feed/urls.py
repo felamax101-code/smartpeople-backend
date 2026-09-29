@@ -1,15 +1,17 @@
 from django.urls import path
-from .views import (PostCreateView,PostListCreateView,CommentCreateView,FollowView,
+from .views import (debug_celery_view,PostCreateView,PostListCreateView,CommentCreateView,FollowView,
                     PostUpvoteView,CommmentReportView,
                     SavedPostView,CatagoryListView,ProfileApprovalView,ReviewAPIview,
                     CommentRepliesView,CommentReplyView,CommentVoteView,PostByIdView,UserListCreateView,
-                    PostReportView,SearchUsersView,ProfileSitemapView,PostSitemapView,PostViewsView,ViewsCount,PostRepostView)
+                    PostReportView,SearchUsersView,ProfileSitemapView,PostSitemapView,PostViewsView,ViewsCount,PostRepostView,PostVideoStatusView)
 
 
 urlpatterns = [
     #admin actions
+    path("debug-celery/", debug_celery_view),
     path("admin/postts/",ProfileApprovalView.as_view(),name="admin-post-list"),
     path("admin/postts/<uuid:id>",ProfileApprovalView.as_view(),name="admin-post-action"),
+    path("post-videos/<uuid:video_id>/status/", PostVideoStatusView.as_view()),
     #categories
     path("categories/",CatagoryListView.as_view(),name="categories"),
     path("posts/",PostCreateView.as_view(),name="create/delete-post"),

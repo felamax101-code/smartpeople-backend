@@ -11,14 +11,14 @@ class CookieJWTAuthentication(JWTAuthentication):
             auth_header=request.headers.get("Authorization")
             if auth_header and auth_header.startswith("Bearer"):
                 access_token=auth_header.split(" ")[1]
-                print("access_token",access_token)
+                
         if not access_token:
             return None
         try:
             validated = self.get_validated_token(access_token)
             return self.get_user(validated), validated
         except (InvalidToken, TokenError) as e:
-            print(e)
+            
             raise AuthenticationFailed(str(e))
         
         

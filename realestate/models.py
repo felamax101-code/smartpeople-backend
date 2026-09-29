@@ -5,6 +5,7 @@ User = get_user_model()
 from django.utils.text import slugify
 from django.utils import timezone
 from django.conf import settings
+from cloudinary_storage.storage import VideoMediaCloudinaryStorage
 
 #helper functions
 def generate_post_slug(name):
@@ -140,7 +141,7 @@ class Post(models.Model):
     comments_count=models.PositiveIntegerField(default=0)
     views_count=models.PositiveIntegerField(default=0)
     saves_count=models.PositiveIntegerField(default=0)
-    
+    client_upload_id = models.UUIDField(unique=True, null=True, blank=True, db_index=True)
     
     class Meta:
        
@@ -242,11 +243,16 @@ class PostVideo(models.Model):
     id=models.UUIDField(primary_key=True,default=uuid.uuid4,editable=False)
     post=models.ForeignKey(Post,on_delete=models.CASCADE,related_name="spvideos")
     owner=models.ForeignKey(User,on_delete=models.CASCADE,related_name="spvideos")
-    video=models.FileField(upload_to="posts/videos/")
+    video=models.FileField(storage=VideoMediaCloudinaryStorage(),blank=True, null=True,upload_to="posts/videos/")
     created_at=models.DateTimeField(auto_now_add=True)
     updated_at=models.DateTimeField(auto_now=True)
     order=models.PositiveIntegerField(default=0)
     is_cover=models.BooleanField(default=False)
+    processing_status = models.CharField(
+        max_length=10,
+        choices=[("processing", "Processing"), ("done", "Done"), ("failed", "Failed")],
+        default="processing",
+    )
     def __str__(self):
         return f"{self.post.name}'s video"
 class PostUpvote(models.Model):

@@ -6,7 +6,8 @@ from .models import ( Post,PostImage,Category,Comment,SavedPost,PostVideo,Review
 from django.contrib.auth import get_user_model
 User=get_user_model()
 from django.utils import timezone
-
+from .utils import save_temp_upload
+from .tasks import transcode_and_attach_video
 class SearchUsersSerializer(serializers.ModelSerializer):
     avatar=serializers.SerializerMethodField()
     class Meta:
@@ -56,7 +57,7 @@ class ImageSerializer(serializers.ModelSerializer):
 class VideoSerializer(serializers.ModelSerializer):
     class Meta:
         model=PostVideo
-        fields=["id","video","order"]
+        fields=["id","video","order","processing_status"]
 class PostListSerializer(serializers.ModelSerializer):
     is_upvoted=serializers.SerializerMethodField()
     owner=UserSerializer(read_only=True)
@@ -163,6 +164,8 @@ class PostSerializer(serializers.ModelSerializer):
     images     = ImageSerializer(many=True, read_only=True)
     videos     = VideoSerializer(many=True, read_only=True)
     is_upvoted = serializers.SerializerMethodField()
+    client_upload_id = serializers.UUIDField(required=False, write_only=True)
+
     is_saved=serializers.SerializerMethodField()
 
     class Meta:
@@ -172,7 +175,7 @@ class PostSerializer(serializers.ModelSerializer):
             "category", "owner", "images", "slug", "videos", "media", "created_at",
             "views_count", "location_display", "location_lat", "is_upvoted",
             "location_lng", "status", "upvotes_count", "comments_count",
-            "sponsored", "media_type","is_saved"
+            "sponsored", "media_type","is_saved","client_upload_id"
         ]
 
     def get_is_upvoted(self, obj):
@@ -200,9 +203,9 @@ class PostSerializer(serializers.ModelSerializer):
         media_type = data.get("media_type")
         request    = self.context.get("request")
 
-        if media_type == "photo" and len(media) > 10:
+        if media_type == "photo" and len(media) > 5:
             raise serializers.ValidationError({"media": "10 images allowed"})
-        if media_type == "video" and len(media) > 10:
+        if media_type == "video" and len(media) > 1:
             raise serializers.ValidationError({"media": "Only 1 video allowed"})
 
         # Only validate fields that are actually being sent (safe for PATCH)
@@ -230,12 +233,14 @@ class PostSerializer(serializers.ModelSerializer):
 
         category = Category.objects.get(id=category_id)
         post  = Post.objects.create(category=category, **validated_data)
-
         if media_type == "video":
             for index, file in enumerate(media_files):
-                PostVideo.objects.create(
-                    owner=user, post=post, video=file, is_cover=(index == 0)
-                )
+                post_video = PostVideo.objects.create(
+            owner=user, post=post, is_cover=(index == 0)
+        )
+                tmp_path = save_temp_upload(file, post_video.id)
+                transcode_and_attach_video.delay(str(post_video.id), tmp_path)
+	
         elif media_type == "photo":
             for index, file in enumerate(media_files):
                 PostImage.objects.create(

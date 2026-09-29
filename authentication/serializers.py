@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-
+import re
 
 from django.contrib.auth.password_validation import validate_password
 
@@ -275,8 +275,23 @@ class UpdateProfileSerializer(serializers.Serializer):
     def validate_bio(self,value):
         return sanitize_plain(value)
     def validate_username(self,value):
-        user=User.objects.filter(username=value).first()
-        if user!=self.context.get("request").user:
+        forbidden = {"admin", "root", "support", "system", "staff", "superuser"}
+        if len(value) < 3:
+            raise serializers.ValidationError(f"Username must be at least {self.min_length} characters.")
+
+        if len(value) > 24:
+            raise serializers.ValidationError(f"Username must not exceed {self.max_length} characters.")
+
+        if not re.match(r'^[a-zA-Z0-9_]+$', value):
+            raise serializers.ValidationError("Username can only contain letters, numbers, and underscores.")
+
+        if value.isdigit():
+            raise serializers.ValidationError("Username cannot be only numbers.")
+
+        if value.lower() in forbidden:
+            raise serializers.ValidationError("This username is forbidden.")
+        user=User.objects.filter(username__iexact=value).first()
+        if user and user!=self.context.get("request").user:
             raise serializers.ValidationError("username already taken .")
         return  sanitize_plain(value)
     def validate_name(self,value):

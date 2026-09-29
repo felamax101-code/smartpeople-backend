@@ -8,14 +8,15 @@ from .views import (ProfileApprovalView,PostCreateView,PostListCreateView,Commen
                     RemoveMemberView,GetGroupMembersView,ViewJoinRequests,ViewPendingInvites,SearchMembersView,GetAdimnModerator,
                     CommunityInfoView,CommunityRules,MyInvitesView,MySentRequestsView,AcceptInviteView,SearchUsersForRoleAssignment,
                     MakeUserAdminOrModerator,GetAsignedRoles,AsignRoleToAModerator,PendingPostListCreateView,RejecetedPostListCreateView,
-                    RejectPostView,ApprovePostView,RequestToJoinAprivateCommunity,AddRemoveCategory,PostViewsView,ViewsCount)
+                    RejectPostView,ApprovePostView,RequestToJoinAprivateCommunity,PostVideoStatusView,AddRemoveCategory,PostViewsView,ViewsCount)
 
 
 urlpatterns = [
     #admin actions
     path("admin/posts/",ProfileApprovalView.as_view(),name="admin-post-list"),
     path("admin/posts/<uuid:id>",ProfileApprovalView.as_view(),name="admin-post-action"),
-    #categories
+    path("post-videos/<uuid:video_id>/status/", PostVideoStatusView.as_view()),
+        #categories
     path("categories/<slug:slug>/",CatagoryListView.as_view(),name="categories"),
     path("<slug:slug>/posts/",PostCreateView.as_view(),name="create/delete-post"),
     path("posts/edit/<str:slug>/",PostCreateView.as_view(),name="edit-post"),

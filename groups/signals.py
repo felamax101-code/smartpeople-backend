@@ -5,7 +5,7 @@ from feed.feed_publisher import publish_new_feed_event,publish_update_feed_event
 from .serializers import PostListSerializer
 from django.conf import settings
 from django.dispatch import receiver
-from .models import (CommunityPost,CommunityPostUpvote, CommunityPostComment,CommunityCommentUpvote,
+from .models import (CommunityPost,Membership,Community,CommunityPostUpvote, CommunityPostComment,CommunityCommentUpvote,
                      CommunityCommentDownvote,CommunitySavedPost,PostViews)
 from authentication.models import Follow,CustomUser
 from authentication.notification_service import notify
@@ -45,6 +45,12 @@ def notify_seller_on_status_change(sender,instance,created,**kwargs):
         send_push=True,
     )
    
+@receiver(post_delete, sender=Membership)
+def decrement_members_count(sender, instance, created, **kwargs):
+    community=Community.objects.filter(id=instance.community_id)
+    if community.members_count >=0:        Community.objects.filter(id=instance.community_id).update(
+            members_count=F("members_count") - 1
+        )
     #email sending and notifications required
 @receiver(post_save, sender=PostViews)
 def increment_views_count(sender, instance, created, **kwargs):
