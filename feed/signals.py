@@ -75,22 +75,22 @@ def decrement_post_upvotes(sender, instance, **kwargs):
 
 
 # comment count
-@receiver(post_save, sender=Comment)
-def increment_comment_count(sender, instance, created, **kwargs):
-    if instance.is_deleted:
-        return
-    if created  :
-        Post.objects.filter(id=instance.post_id).update(
-            comments_count=F("comments_count") + 1
-        )
-        def publish_after_commit():
-            post=Post.objects.only("id","slug","comments_count").get(id=instance.post_id)
-            publish_update_feed_event("change_comments_count_post", {
-            "id": str(instance.post_id),
-            "slug": post.slug,
-            "comments_count": post.comments_count,
-        })
-        transaction.on_commit(publish_after_commit)
+# @receiver(post_save, sender=Comment)
+# def increment_comment_count(sender, instance, created, **kwargs):
+#     if instance.is_deleted:
+#         return
+#     if created  :
+#         Post.objects.filter(id=instance.post_id).update(
+#             comments_count=F("comments_count") + 1
+#         )
+#         def publish_after_commit():
+#             post=Post.objects.only("id","slug","comments_count").get(id=instance.post_id)
+#             publish_update_feed_event("change_comments_count_post", {
+#             "id": str(instance.post_id),
+#             "slug": post.slug,
+#             "comments_count": post.comments_count,
+#         })
+#         transaction.on_commit(publish_after_commit)
 @receiver(post_delete, sender=Comment)
 def decrement_comment_count(sender, instance, **kwargs):
     Post.objects.filter(id=instance.post.id).update(

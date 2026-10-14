@@ -104,20 +104,28 @@ class ProgressiveThrottle(BaseThrottle):
 
     def _evaluate(self, history, now):
         """
-        Progressive enforcement:
-        First exceeded stage immediately applies its penalty.
+        Check every stage; the most severe exceeded stage wins.
+        max_attempts=None means a catch-all lockout: any recent activity
+        inside the window triggers the penalty.
         """
+        worst_retry = 0
+        blocked = False
 
         for max_attempts, window, retry_after in self.stages:
             recent = [t for t in history if now - t < window]
 
-            # if max_attempts is None:
-            #     if recent:
-            #         return False, retry_after
-            #     continue
-            if len(recent) >= max_attempts:
-                return False, retry_after
-        return True, 0
+            if max_attempts is None:
+                exceeded = len(recent) > 0
+            else:
+                exceeded = len(recent) >= max_attempts
+
+            if exceeded:
+                blocked = True
+                worst_retry = max(worst_retry, retry_after)
+
+        return (not blocked), worst_retry
+
+        
     def wait(self):
         return getattr(self, 'retry_after', None)
     def reset_on_success(self,request):
@@ -240,7 +248,7 @@ class ForgotPasswordThrottle(ProgressiveThrottle):
     stages = [
         (3,    3600,   0),
         (5,    10800,  900),
-        (10,   18000,  600),
+        (10,   18000,  3600),
         (None, 86400,  21600),
     ]
 

@@ -1,6 +1,6 @@
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, FormParser
-
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
 from .utils import validate_image_file
 from rest_framework import status
@@ -22,7 +22,7 @@ User = get_user_model()
 
 
 class ConversationListCreateView(APIView):
-
+    permission_classes=[IsAuthenticated]
     def get(self, request):
         deleted_conversation_ids = ConversationDeletes.objects.filter(
             user=request.user, is_active=True
@@ -89,6 +89,7 @@ class ConversationListCreateView(APIView):
 
 
 class ConversationMessagesView(APIView):
+    permission_classes=[IsAuthenticated]
     def get(self, request, conversation_id):
         conversation = get_object_or_404(
             Conversation, id=conversation_id, participants=request.user
@@ -222,7 +223,12 @@ class ConversationMessagesView(APIView):
 
 
 def _update_last_message(conversation, message):
-    preview = message.body[:97] + "..." if message.body and len(message.body) > 100 else message.body
+    if message.message_type=="video":
+        preview="📽️ video"
+    elif message.message_type=="image":
+        preview="📷 Photo"
+    else:
+        preview = message.body[:97] + "..." if message.body and len(message.body) > 100 else message.body
     conversation.last_message_preview = preview
     conversation.last_message_at = message.created_at
     conversation.save(update_fields=["last_message_preview", "last_message_at"])
@@ -250,7 +256,7 @@ def _broadcast_message(conversation_id, message):
     )
     
 class MessageReactionView(APIView):
-
+    permission_classes=[IsAuthenticated]
     def post(self, request, conversation_id, message_id):
         get_object_or_404(Conversation, id=conversation_id, participants=request.user)
         message = get_object_or_404(Message, id=message_id, is_deleted=False)
@@ -305,7 +311,7 @@ from django.db.models import Count, Q
 
 class MessageReadView(APIView):
     """PATCH /messages/<message_id>/read/"""
-
+    permission_classes=[IsAuthenticated]
     def patch(self, request, message_id):
         message = get_object_or_404(Message, id=message_id)
 
@@ -354,7 +360,7 @@ class MessageReadView(APIView):
 
 class OfferActionView(APIView):
     """POST /messages/<message_id>/offer/"""
-
+    permission_classes=[IsAuthenticated]
     def post(self, request, message_id):
         message = get_object_or_404(Message, id=message_id)
 
@@ -383,7 +389,7 @@ class OfferActionView(APIView):
 
 class MessageDeleteView(APIView):
     """DELETE /conversations/<conversation_id>/messages/<message_id>/ — soft delete, sender only"""
-
+    permission_classes=[IsAuthenticated]
     def delete(self, request, conversation_id, message_id):
         message = get_object_or_404(Message, id=message_id, conversation_id=conversation_id)
 
@@ -408,7 +414,7 @@ class MessageDeleteView(APIView):
 
 class MessageDeleteForMeView(APIView):
     """DELETE /conversations/message/delete-for-me/<conversation_id>/<message_id>/"""
-
+    permission_classes=[IsAuthenticated]
     def delete(self, request, conversation_id, message_id):
         get_object_or_404(Conversation, id=conversation_id, participants=request.user)
         MessageDeletes.objects.get_or_create(message_id=message_id, user=request.user)
@@ -417,7 +423,7 @@ class MessageDeleteForMeView(APIView):
 
 class ConversationDeleteView(APIView):
     """DELETE /conversations/delete/<conversation_id>/conversation/ — delete-for-me only"""
-
+    permission_classes=[IsAuthenticated]
     def delete(self, request, conversation_id):
         conversation = get_object_or_404(Conversation, id=conversation_id)
         record, created = ConversationDeletes.objects.get_or_create(
@@ -432,7 +438,7 @@ class ConversationDeleteView(APIView):
 
 class GroupCreateView(APIView):
     """POST /conversations/groups/"""
-
+    permission_classes=[IsAuthenticated]
     def post(self, request):
         group_name = request.data.get("group_name", "").strip()
         participant_ids = request.data.get("participant_ids", [])
@@ -496,7 +502,7 @@ class GroupCreateView(APIView):
 
 class GroupMembersView(APIView):
     """GET /conversations/groups/<conversation_id>/members/  and  POST to add members"""
-
+    permission_classes=[IsAuthenticated]
     def get(self, request, conversation_id):
         get_object_or_404(Conversation, id=conversation_id, participants=request.user)
         rows = (
@@ -573,14 +579,14 @@ class GroupMembersView(APIView):
 
 class GroupMemberDetailView(APIView):
     """DELETE /conversations/groups/<conversation_id>/members/<target_user_id>/ — admin removes someone"""
-
+    permission_classes=[IsAuthenticated]
     def delete(self, request, conversation_id, target_user_id):
         return _remove_member(request, conversation_id, target_user_id, allow_self_leave=False)
 
 
 class GroupLeaveView(APIView):
     """DELETE /conversations/groups/<conversation_id>/leave/ — anyone leaves"""
-
+    permission_classes=[IsAuthenticated]
     def delete(self, request, conversation_id):
         return _remove_member(request, conversation_id, request.user.id, allow_self_leave=True)
 
@@ -625,7 +631,7 @@ def _remove_member(request, conversation_id, target_user_id, allow_self_leave):
 
 class GroupSettingsView(APIView):
     parser_classes = [MultiPartParser, FormParser]  # now accepts multipart, not just JSON
-
+    permission_classes=[IsAuthenticated]
     def patch(self, request, conversation_id):
         is_admin = ConversationParticipant.objects.filter(
             conversation_id=conversation_id, user=request.user, is_admin=True
@@ -675,7 +681,7 @@ def _broadcast(conversation_id, event_type, data):
     )
 class UnreadCountView(APIView):
     """GET /conversations/unreadCount/"""
-
+    permission_classes=[IsAuthenticated]
     def get(self, request):
         conversations = Conversation.objects.filter(participants=request.user)
         total_unread = 0
@@ -699,7 +705,7 @@ class UnreadCountView(APIView):
 
 class UserSearchView(APIView):
     """GET /users/search/?q=...&limit=..."""
-
+    permission_classes=[IsAuthenticated]
     def get(self, request):
         q = request.query_params.get("q", "").strip()
         limit = min(int(request.query_params.get("limit", 20)), 50)

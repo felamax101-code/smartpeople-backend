@@ -26,9 +26,12 @@ class PropertyProfile(models.Model):
     )
     name=models.CharField(max_length=50,blank=True,null=True)
     org_name=models.CharField(max_length=50,blank=True,null=True)
+    about=models.TextField(null=True,max_length=500,blank=True)
     can_post_listings = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
-
+    cover_image=models.ImageField(upload_to="propertyprofile/coverimaga/",null=True,blank=True)
+    avatar=models.ImageField(upload_to="propertyprofile/avatars/",null=True,blank=True)
+    whatsapp=models.PositiveIntegerField(null=True,blank=True)
     def __str__(self):
         return f"PropertyProfile({self.user}) - can_post={self.can_post_listings}"
 
@@ -99,6 +102,7 @@ class Post(models.Model):
     )
     category=models.ForeignKey(Category,on_delete=models.SET_NULL,related_name="spposts",null=True,blank=True)
     owner=models.ForeignKey(User,on_delete=models.CASCADE,related_name="spposts")
+    property_profile=models.ForeignKey(PropertyProfile,on_delete=models.CASCADE,related_name="spposts",null=True,blank=True)
     id=models.UUIDField(primary_key=True,default=uuid.uuid4,editable=False)
     name=models.CharField(max_length=100,blank=True,null=True)
     slug=models.SlugField(max_length=200,unique=True,blank=True)
@@ -109,7 +113,7 @@ class Post(models.Model):
     )
     post_type=models.CharField(max_length=10,choices=TYPES,default="text")
     description=models.TextField()
-    location_display=models.CharField()
+    location_display=models.CharField(null=True,blank=True)
     location_lat=models.FloatField(null=True,blank=True)
     location_lng=models.FloatField(null=True,blank=True)
     listing_type=models.CharField(choices=LISTING_TYPES,default="rental")

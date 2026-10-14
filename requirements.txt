@@ -2,7 +2,6 @@ aiohappyeyeballs==2.6.1
 aiohttp==3.13.5
 aiosignal==1.4.0
 amqp==5.3.1
-vercel
 annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.13.0
@@ -20,7 +19,7 @@ block-disposable-email==2.0.0
 build==1.4.3
 CacheControl==0.14.4
 cbor2==6.0.1
-
+celery==5.6.3
 certifi==2026.2.25
 cffi==2.0.0
 channels==4.3.2
@@ -48,7 +47,6 @@ django-cors-headers==4.9.0
 django-disposable-email-checker==2.0.4
 django-filter==25.2
 django-jazzmin==3.0.4
-
 django-phonenumber-field==8.4.0
 django-ratelimit==4.1.0
 django-sendgrid-v5==1.3.1
@@ -74,12 +72,15 @@ googleapis-common-protos==1.75.0
 greenlet==3.5.0
 grpcio==1.80.0
 grpcio-status==1.80.0
+gunicorn==26.2.0
 h11==0.16.0
 h2==4.3.0
 hpack==4.1.0
 httpcore==1.0.9
+httpcore2==2.3.0
 httptools==0.8.0
 httpx==0.28.1
+httpx2==2.3.0
 hyperframe==6.1.0
 hyperlink==21.0.0
 idna==3.11
@@ -104,6 +105,7 @@ nbformat==5.10.4
 packaging==26.0
 pandocfilters==1.5.1
 parso==0.8.7
+pexpect==4.9.0
 phonenumbers==9.0.30
 phonenumberslite==9.0.30
 pickleshare==0.7.5
@@ -117,6 +119,7 @@ propcache==0.5.2
 proto-plus==1.28.0
 protobuf==6.33.6
 psycopg2-binary==2.9.12
+ptyprocess==0.7.0
 pure_eval==0.2.3
 py-ubjson==0.16.1
 pyasn1==0.6.3
@@ -136,7 +139,6 @@ python-dotenv==1.2.2
 python-http-client==3.3.7
 python-jose==3.5.0
 python-magic==0.4.27
-
 python-multipart==0.0.32
 PyYAML==6.0.3
 pyzmq==27.1.0
@@ -147,6 +149,7 @@ requests==2.34.2
 rest-framework-simplejwt==0.0.2
 rpds-py==0.30.0
 rsa==4.9.1
+semver==3.1.0
 sendgrid==6.12.5
 sentry-sdk==2.57.0
 service-identity==24.2.0
@@ -161,6 +164,7 @@ stripe==15.1.0
 tinycss2==1.4.0
 tornado==6.5.5
 traitlets==5.15.0
+truststore==0.10.4
 Twisted==25.5.0
 txaio==25.12.2
 typing-inspection==0.4.2
@@ -173,6 +177,15 @@ ujson==5.12.1
 urllib3==2.6.3
 user-agents==2.2.0
 uvicorn==0.47.0
+vercel==0.11.4
+vercel-cache==0.7.5
+vercel-headers==0.7.2
+vercel-internal-core==0.2.0
+vercel-internal-telemetry==0.8.0
+vercel-oidc==0.9.0
+vercel-queue==0.9.0
+vercel-sandbox==0.7.0
+vercel-workflow==0.11.0
 vine==5.1.0
 watchfiles==1.2.0
 wcwidth==0.6.0
@@ -183,3 +196,4 @@ wheel==0.46.3
 yarg==0.1.9
 yarl==1.23.0
 zope.interface==8.4
+zstandard==0.25.0

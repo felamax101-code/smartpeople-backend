@@ -6,6 +6,10 @@ from .models import ( Post,PostImage,Category,Comment,SavedPost,PostVideo,Review
 from django.contrib.auth import get_user_model
 User=get_user_model()
 from django.utils import timezone
+from .utils import save_temp_upload
+from feed.serializers import PostSoundSerializer
+from .tasks import transcode_and_attach_video
+from django.db import transaction
 
 
 
@@ -105,14 +109,16 @@ class ImageSerializer(serializers.ModelSerializer):
 class VideoSerializer(serializers.ModelSerializer):
     class Meta:
         model=PostVideo
-        fields=["id","video","order"]
+        fields=["id","video","order","processing_status"]
 class PostListSerializer(serializers.ModelSerializer):
     is_upvoted=serializers.SerializerMethodField()
     owner=UserSerializer(read_only=True)
     is_saved=serializers.SerializerMethodField()
+    sound = serializers.SerializerMethodField()
     images=ImageSerializer(many=True,read_only=True,source="spimages")
     videos=VideoSerializer(many=True,read_only=True,source="spvideos")
     category=CategorySerializer(read_only=True)
+    property_profile=PropertyProfileSerializer(read_only=True,required=False)
     class Meta:
         model=Post
         fields=["id","name","description","post_type","saves_count",
@@ -120,7 +126,7 @@ class PostListSerializer(serializers.ModelSerializer):
                 "views_count","comments_count","is_upvoted","sponsored",
                 "status","owner","location_display","location_lat","location_lng",
                 "status","is_saved","upvotes_count",
-                "created_at","videos","price","deposit","monthly_installment","listing_type"]
+                "created_at","videos","price","deposit","monthly_installment","listing_type","property_profile"]
 
         
             
@@ -133,7 +139,14 @@ class PostListSerializer(serializers.ModelSerializer):
             return None
         return PostUpvote.objects.filter(post=obj,voter=request.user).exists()
   
-            
+    def get_sound(self, obj):
+        ps = getattr(obj, "post_sound", None)
+        if ps is None:
+            return None
+        # takedown: photo posts lose their music; videos have it baked in already
+        if ps.sound.status != "active" and obj.post_type == "image":
+            return None
+        return PostSoundSerializer(ps).data
     def get_is_saved(self,obj):
         request=self.context.get("request")
         if not request:
@@ -168,6 +181,7 @@ class OwnPostListSerializer(serializers.ModelSerializer):
     is_saved=serializers.SerializerMethodField()
     images=ImageSerializer(many=True,read_only=True,source="spimages")
     videos=VideoSerializer(many=True,read_only=True,source="spvideos")
+    property_profile=PropertyProfileSerializer(read_only=True,required=False)
     category=CategorySerializer(read_only=True)
     class Meta:
         model=Post
@@ -176,7 +190,7 @@ class OwnPostListSerializer(serializers.ModelSerializer):
                 "views_count","comments_count","is_upvoted","sponsored",
                 "status","owner","location_display","location_lat","location_lng",
                 "status","is_saved","upvotes_count","status",
-                "created_at","videos","deposit","monthly_installment","listing_type","house_type"]
+                "created_at","videos","deposit","monthly_installment","listing_type","house_type","property_profile"]
 
         
             
@@ -211,6 +225,7 @@ class PostSerializer(serializers.ModelSerializer):
     media_type       = serializers.ChoiceField(choices=["photo","text","video"], write_only=True, required=False)
     location_display=serializers.CharField(required=False)
     owner      = PostOwnerSerializer(read_only=True)
+    property_profile=PropertyProfileSerializer(read_only=True,required=False)
     images     = ImageSerializer(many=True, read_only=True,source="spimages")
     videos     = VideoSerializer(many=True, read_only=True,source="spvideos")
     is_upvoted = serializers.SerializerMethodField()
@@ -218,17 +233,28 @@ class PostSerializer(serializers.ModelSerializer):
     deposit=serializers.IntegerField(required=False,min_value=0)
     monthly_installment=serializers.IntegerField(required=False,min_value=0)
     listing_type=serializers.ChoiceField(required=True,choices=["rental","sale"])
+    client_upload_id = serializers.UUIDField(required=False, write_only=True)
+    sound_id = serializers.UUIDField(write_only=True, required=False)  
+    sound = serializers.SerializerMethodField()
 
     class Meta:
         model  = Post
         fields = [
-            "id", "name", "description","post_type","saves_count",
+            "id", "name", "description","post_type","saves_count","client_upload_id",
             "category", "owner", "images", "slug", "videos", "media", "created_at",
             "views_count", "location_display", "location_lat", "is_upvoted","price",
             "location_lng", "status", "upvotes_count", "comments_count",
-            "sponsored", "media_type","is_saved","deposit","monthly_installment","listing_type","house_type"
+            "sponsored", "media_type","is_saved","deposit","monthly_installment",
+            "listing_type","house_type","property_profile","sound_id","sound"
         ]
-
+    def get_sound(self, obj):
+        ps = getattr(obj, "post_sound", None)
+        if ps is None:
+            return None
+        # takedown: photo posts lose their music; videos have it baked in already
+        if ps.sound.status != "active" and obj.post_type == "image":
+            return None
+        return PostSoundSerializer(ps).data
     def get_is_upvoted(self, obj):
         request = self.context.get("request")
         if not request or not request.user.is_authenticated:
@@ -277,34 +303,80 @@ class PostSerializer(serializers.ModelSerializer):
             data["owner"] = request.user
 
         return data
+    def _pop_sound_data(self, validated_data):
+        sound = validated_data.pop("sound_obj", None)
+        start = validated_data.pop("music_start", 0)
+        volume = validated_data.pop("music_volume", 0.5)
+        keep = validated_data.pop("keep_original_audio", True)
+        validated_data.pop("sound_id", None)
+        if sound is None:
+            return None
+        return {"sound": sound, "start_offset": start,
+                "volume": volume, "keep_original_audio": keep}
+    def _validate_sound(self, data, request):
+        sound_id = data.get("sound_id")
 
+        if sound_id is None:
+            for f in SOUND_INPUT_FIELDS:   # settings without a sound are meaningless
+                data.pop(f, None)
+            return data
+
+        post_type = data.get("post_type") or (self.instance.post_type if self.instance else None)
+        if post_type != "image":
+            raise serializers.ValidationError({"sound_id": "Text posts can't have music."})
+        if self.instance and self.instance.post_type == "video":
+            raise serializers.ValidationError(
+                {"sound_id": "Music can't be changed after a video is posted."}
+            )
+
+        try:
+            sound = Sound.objects.get(id=sound_id, status="active")
+        except Sound.DoesNotExist:
+            raise serializers.ValidationError({"sound_id": "This sound is not available."})
+
+        if not user_can_use_sound(request.user, sound):
+            raise serializers.ValidationError({"sound_id": "You need a license to use this sound."})
+
+        if sound.duration and data.get("music_start", 0) >= sound.duration:
+            raise serializers.ValidationError({"music_start": "Start time is past the end of the track."})
+
+        data["sound_obj"] = sound   # resolved object, so create() doesn't query again
+        return data
     def create(self, validated_data):
         media_files = validated_data.pop("media", [])
         media_type  = validated_data.pop("media_type", None)
         user        = validated_data["owner"]
         category_id = validated_data.pop("category")
+        sound_data = self._pop_sound_data(validated_data)
+        property_profile=self.context.get("property_profile")
+        with transaction.atomic():
+            category = Category.objects.get(id=category_id)
+            if sound_data:
+                PostSound.objects.create(post=post, **sound_data)
+            post  = Post.objects.create(category=category,property_profile=property_profile, **validated_data)
+            if media_type == "video":
+                for index, file in enumerate(media_files):
+                    post_video = PostVideo.objects.create(
+                owner=user, post=post, is_cover=(index == 0)
+            )
+                    tmp_path = save_temp_upload(file, post_video.id)
+                    transcode_and_attach_video.delay(str(post_video.id), tmp_path)
 
-        category = Category.objects.get(id=category_id)
-        post  = Post.objects.create(category=category, **validated_data)
+            elif media_type == "photo":
+                for index, file in enumerate(media_files):
+                    PostImage.objects.create(
+                        owner=user, post=post, image=file, is_cover=(index == 0)
+                    )
 
-        if media_type == "video":
-            for index, file in enumerate(media_files):
-                PostVideo.objects.create(
-                    owner=user, post=post, video=file, is_cover=(index == 0)
-                )
-        elif media_type == "photo":
-            for index, file in enumerate(media_files):
-                PostImage.objects.create(
-                    owner=user, post=post, image=file, is_cover=(index == 0)
-                )
-
-        return post
+            return post
 
     def update(self, instance, validated_data):
         media_files = validated_data.pop("media", [])
         media_type  = validated_data.pop("media_type", None)
         category_id = validated_data.pop("category", None)
-
+        sound_data = self._pop_sound_data(validated_data)
+        if sound_data:
+            PostSound.objects.update_or_create(post=instance, defaults=sound_data)
         if category_id:
             instance.category = Category.objects.get(id=category_id)
 

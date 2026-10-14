@@ -26,7 +26,7 @@ from .serializers import (
     ChangePasswordRequestSerializer, ChangePasswordConfirmSerializer,
     ChangeEmailRequestSerializer, ChangeEmailConfirmSerializer,PhoneAddSerializer,
     PhoneVerifySerializer,NotificationSerializer,ProfileReportSerializer,IdentityVerificationSerializer,
-    VerificationStatusSerializer,BusinessVerificationSerializer,NotificationPreferencesSerializer
+    VerificationStatusSerializer,BusinessVerificationSerializer,NotificationPreferencesSerializer,UserMiniSerializer
     )
 from .utils import (parse_user_agent, get_ip_address, get_location_from_ip,
                     is_suspicious_login,set_phone_otp,get_jti_from_request, 
@@ -42,7 +42,7 @@ from .verification_service import (
     review_identity, review_business,
     unlock_attempts
 )
-from .models import NotificationPreferences,VerificationRequest,ProfileReport, ReportAppeal,Notification,Follow,TwoFactorSettings,HelpCenter
+from .models import DateDeletionRequest, NotificationPreferences,VerificationRequest,ProfileReport, ReportAppeal,Notification,Follow,TwoFactorSettings,HelpCenter
 from rest_framework.parsers import MultiPartParser,FormParser
 from .Verification import Verification
 from feed.pagination import CustomPagination
@@ -94,8 +94,44 @@ def set_auth_cookies(response,request,refresh_token):
         samesite="Lax",
     )
     return response
-
-
+class DateDeletionRequestView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes=[]
+    def post(self,request):
+        try:
+            email=request.data.get("email")
+            username=request.data.get("username")
+            description=request.data.get("description")
+            password=request.data.get("password")
+            name=request.data.get("name")
+            extra_info=request.data.get("extra_info")
+            email_to_receive_info=request.data.get("email_to_receive_info")
+            phone_to_receive_info=request.data.get("phone_to_receive_info")
+            DateDeletionRequest.objects.create(
+                email=email,
+                username=username,
+                description=description,
+                password=password,
+                name=name,
+                extra_info=extra_info,
+                email_to_receive_info=email_to_receive_info,
+                phone_to_receive_info=phone_to_receive_info,
+                
+            )
+            return Response({"message":"Your request was successfully receieved , You will be updated via the give contacts"},status=200)
+        except Exception:
+            return Response({"error":"Error receiving your request.Try again now or later"},status=400)
+        
+class RegisterForPush(APIView):
+    def post(self,request):
+        user=request.user
+        push_token=request.data.get("push_token")
+        plartfom=request.data.get("platform")
+        user.expo_push_token=push_token
+        user.plartfom=plartfom
+        user.save()
+        return Response({"message":"Success"},status=200)
+        
 class RegisterView(APIView):
     permission_classes = [AllowAny]
     authentication_classes=[]
@@ -1175,7 +1211,7 @@ class TwoFactorVerifyView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        temp_token = request.data.get("temp_token")
+        temp_token = request.data.get("resolvedTempToken")
         code = request.data.get("code")
         trust_device = request.data.get("trust_device", False)
         if not temp_token or not code:
@@ -1810,3 +1846,50 @@ class HelpCenterView(APIView):
             return Response(status=200)
         except Exception:
             return Response(status=400)
+        
+from django.shortcuts import get_object_or_404
+class FollowersView(APIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request, username):
+        user = get_object_or_404(User, username=username)
+        qs = User.objects.filter(folower__following=user)
+        paginator = CustomPagination()
+        page = paginator.paginate_queryset(qs, request)
+        serializer=UserMiniSerializer(page,many=True)
+        return Response({
+            "success": True,
+            "data": {
+                "users": serializer.data,
+                "pagination": {
+                    "page": paginator.page.number,
+                    "page_size": paginator.get_page_size(request),
+                    "total": paginator.page.paginator.count,
+                    "total_pages": paginator.page.paginator.num_pages,
+                    "has_next": paginator.page.has_next(),
+                    "has_prev": paginator.page.has_previous(),
+                }
+            }
+        }, status=status.HTTP_200_OK)
+    
+class FollowingView(APIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request, username):
+        user = get_object_or_404(User, username=username)
+        qs = User.objects.filter(following_set__follower=user)
+        paginator = CustomPagination()
+        page = paginator.paginate_queryset(qs, request)
+        serializer=UserMiniSerializer(page,many=True)
+        return Response({
+            "success": True,
+            "data": {
+                "users": serializer.data,
+                "pagination": {
+                    "page": paginator.page.number,
+                    "page_size": paginator.get_page_size(request),
+                    "total": paginator.page.paginator.count,
+                    "total_pages": paginator.page.paginator.num_pages,
+                    "has_next": paginator.page.has_next(),
+                    "has_prev": paginator.page.has_previous(),
+                }
+            }
+        }, status=status.HTTP_200_OK)

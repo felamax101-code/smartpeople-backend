@@ -16,10 +16,19 @@ from .views import (
     TwoFactorResendView,BackupCodesView,TrustedDeviceView,LogoutOtherSessionsView,ProfileReporFromIdView,
     FCMTokenView,ProfileReportView,AdminReportView,AppealView,AdminAppealView,
     NotificationView,User2faStatusView,NotificationUnreadCountView,ProfileBlockView,PermissionsCheckView,UploadGroupAvatar,
-    DeleteConfirmAccountView,DeleteRequestAccountView,NotificationPreferencesView,HelpCenterView
+    DeleteConfirmAccountView,DeleteRequestAccountView,NotificationPreferencesView,HelpCenterView,
+    RegisterForPush,DateDeletionRequestView,FollowersView,FollowingView
 )
 
 urlpatterns = [
+    #followers
+    path("followers/<str:username>/",FollowersView.as_view(),name="folowers"),
+    #following
+    path("following/<str:username>/",FollowingView.as_view(),name="following"),
+    #opem endpoint for web requests for data deletion 
+    path("request-data-delete/",DateDeletionRequestView.as_view(),name="DateDeletionRequestView"),
+    #push notification
+    path("push-notifications/",RegisterForPush.as_view(),name="register-push"),
     # Registration & verification
     path("register/", RegisterView.as_view(), name="register"),
     path("verify-email/", VerifyEmailView.as_view(), name="verify-email"),

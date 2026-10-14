@@ -27,7 +27,25 @@ from .validators import EmailValidator, FlexibleUsernameValidator,normalize_phon
 
 
 #  Helpers 
-
+class UserMiniSerializer(serializers.ModelSerializer):
+    """For endpoints that require the absolute non-restricted user info"""
+    
+    verification_badge=serializers.SerializerMethodField()
+    class Meta:
+        model = User
+        fields = [
+            'id', 'username',  'avatar',
+            "verification_level","verification_badge",
+            
+             
+        ]
+    def get_verification_badge(self,obj):
+        badge=obj.verification_badge
+        return {
+                "label":badge.get("label"),
+                "color":badge.get("color"),
+                "icon":badge.get("icon")
+        }
 
 class UserSerializer(serializers.ModelSerializer):
     """Full user info — for /users/me/"""

@@ -10,3 +10,8 @@ def save_temp_upload(uploaded_file, identifier):
         for chunk in uploaded_file.chunks():
             dest.write(chunk)
     return tmp_path
+
+
+#check sound permission ,Tru for now
+def user_can_use_sound(user, sound):
+    return True

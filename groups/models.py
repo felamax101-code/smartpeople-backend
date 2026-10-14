@@ -5,7 +5,7 @@ import uuid
 User = get_user_model()
 from feed.models import generate_post_slug
 from cloudinary_storage.storage import VideoMediaCloudinaryStorage
-
+from feed.models import Sound   
 class Community(models.Model):
     """The group itself"""
     PRIVACY_CHOICES = [
@@ -139,29 +139,30 @@ class CommunityPost(models.Model):
     )
     post_type=models.CharField(max_length=10,choices=TYPES,default="text")
     description=models.TextField()
-    location_display=models.CharField()
+    location_display=models.CharField(null=True,blank=True)
     location_lat=models.FloatField(null=True,blank=True)
     location_lng=models.FloatField(null=True,blank=True)
+    allow_download=models.BooleanField(default=True)
+    is_AI_generated=models.BooleanField(default=False)
+    is_harmful=models.BooleanField(default=False)
     STATUS=(
         ("approved","Aproved"),
         ("pending","Pending"),
         ("rejected","Rejected"),
     )
     status=models.TextField(choices=STATUS,default="pending")
-    rejection_reason=models.TextField(blank=True,null=True)
+    rejection_reason=models.TextField(blank=True,null=True,max_length=500)
     sponsored=models.BooleanField(default=False)
     created_at=models.DateTimeField(auto_now_add=True)
     updated_at=models.DateTimeField(auto_now=True)
     client_upload_id = models.UUIDField(unique=True, null=True, blank=True, db_index=True)
     is_active=models.BooleanField(default=True)
-    
-    
-    
     upvotes_count=models.PositiveIntegerField(default=0)
     comments_count=models.PositiveIntegerField(default=0)
     views_count=models.PositiveIntegerField(default=0)
     saves_count=models.PositiveIntegerField(default=0)
-    
+    is_removed_by_admin=models.BooleanField(default=False)
+    admin_removal_reason=models.TextField(blank=True,null=True,max_length=500)
     
     class Meta:
         verbose_name = 'Community Post'
@@ -316,7 +317,7 @@ class CommunityPostComment(models.Model):
         on_delete=models.SET_NULL,
         related_name="direct_replies")
     reply_to=models.ForeignKey(User,on_delete=models.CASCADE,related_name="community_reply_to",null=True,blank=True)
-    body=models.CharField()
+    body=models.CharField(max_length=2000)
     deleted_body=models.CharField(null=True,blank=True)
     created_at=models.DateTimeField(auto_now_add=True)
     is_active=models.BooleanField(default=True)
@@ -328,13 +329,69 @@ class CommunityPostComment(models.Model):
     is_reported=models.BooleanField(default=False)
     report_reason=models.CharField(blank=True,null=True)
     is_edited=models.BooleanField(default=False)
+    is_removed_by_admin=models.BooleanField(default=False)
+    admin_removal_reason=models.TextField(blank=True,null=True,max_length=500)
     
     class  Meta:
         verbose_name_plural = 'CommunityPostComment'
         ordering=["-created_at"]
     def __str__ (self):
         return f"{self.author.username}'s comment on {self.post.name} : {self.body}"
-        
+class CommunityCommentReport(models.Model):
+    REASON_CHOICES = (
+        ("Spam or scam", "Spam or scam"),
+        ("Fake Account", "Fake Account"),
+        ("Harassment", "Harassment"),
+        ("Inappropriate Content", "Inappropriate Content"),
+        ("Inappropriate Behavior","Inappropriate Behavior"),
+        ("Impersonation", "Impersonation"),
+        ("Other", "Other"),
+    )
+
+    STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("reviewed", "Reviewed"),
+        ("dismissed", "Dismissed"),
+    )
+
+    ACTION_CHOICES = (
+        ("none", "No Action"),
+        ("warn", "Warning Issued"),
+        ("suspend", "Account Suspended"),
+        ("ban", "Account Banned"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    reporter = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="community_comment_reports_filed"
+    )
+    comment = models.ForeignKey(
+        CommunityPostComment,
+        on_delete=models.CASCADE,
+        related_name="community_comment_reports_received"
+    )
+    reason = models.CharField(max_length=1000)
+    description = models.TextField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    action_taken = models.CharField(max_length=20, choices=ACTION_CHOICES, default="none")
+    reviewed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="community_comments_reports_reviewed"
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = 'CommunityCommentReport'
+        # unique_together = ("reporter", "comment", "reason")
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.reporter} report on {self.comment}"
 class CommunityCommentUpvote(models.Model):
     id=models.UUIDField(primary_key=True,default=uuid.uuid4,editable=False)
     comment=models.ForeignKey(CommunityPostComment,on_delete=models.CASCADE,related_name="community_comment_upvotes")

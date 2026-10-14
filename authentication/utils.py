@@ -99,8 +99,8 @@ def send_2fa_otp_email(email,username,otp):
     <body style="margin:0;padding:0;background:#080a0e;font-family:'Courier New',monospace">
       <div style="max-width:480px;margin:40px auto;background:#0c0f16;border:1px solid #1c2030;border-radius:12px;overflow:hidden">
         <div style="background:linear-gradient(135deg,#0d1f15,#0a1520);padding:28px;text-align:center;border-bottom:1px solid #1c2030">
-          <div style="font-size:28px;margin-bottom:8px">SPH</div>
-          <div style="font-family:sans-serif;font-size:20px;font-weight:900;color:#3bff9e;letter-spacing:-0.03em">SmartPyhub</div>
+          <div style="font-size:28px;margin-bottom:8px">SP</div>
+          <div style="font-family:sans-serif;font-size:20px;font-weight:900;color:#3bff9e;letter-spacing:-0.03em">SmartPipla</div>
           <div style="font-size:11px;color:#536080;margin-top:4px">Email Verification</div>
         </div>
         <div style="padding:32px">
@@ -141,8 +141,8 @@ def send_otp_email(email, otp, username=''):
     <body style="margin:0;padding:0;background:#080a0e;font-family:'Courier New',monospace">
       <div style="max-width:480px;margin:40px auto;background:#0c0f16;border:1px solid #1c2030;border-radius:12px;overflow:hidden">
         <div style="background:linear-gradient(135deg,#0d1f15,#0a1520);padding:28px;text-align:center;border-bottom:1px solid #1c2030">
-          <div style="font-size:28px;margin-bottom:8px">SPH</div>
-          <div style="font-family:sans-serif;font-size:20px;font-weight:900;color:#3bff9e;letter-spacing:-0.03em">SmartPyhub</div>
+          <div style="font-size:28px;margin-bottom:8px">SP</div>
+          <div style="font-family:sans-serif;font-size:20px;font-weight:900;color:#3bff9e;letter-spacing:-0.03em">SmartPipla</div>
           <div style="font-size:11px;color:#536080;margin-top:4px">Email Verification</div>
         </div>
         <div style="padding:32px">
@@ -177,8 +177,8 @@ def send_account_delete_email(email, username=''):
     <body style="margin:0;padding:0;background:#080a0e;font-family:'Courier New',monospace">
       <div style="max-width:480px;margin:40px auto;background:#0c0f16;border:1px solid #1c2030;border-radius:12px;overflow:hidden">
         <div style="background:linear-gradient(135deg,#0d1f15,#0a1520);padding:28px;text-align:center;border-bottom:1px solid #1c2030">
-          <div style="font-size:28px;margin-bottom:8px">SPH</div>
-          <div style="font-family:sans-serif;font-size:20px;font-weight:900;color:#3bff9e;letter-spacing:-0.03em">SmartPyhub</div>
+          <div style="font-size:28px;margin-bottom:8px">SP</div>
+          <div style="font-family:sans-serif;font-size:20px;font-weight:900;color:#3bff9e;letter-spacing:-0.03em">SmartPipla</div>
           <div style="font-size:11px;color:#536080;margin-top:4px">ACCOUNT DELETION NOTICE</div>
         </div>
         <div style="padding:32px">
@@ -399,7 +399,7 @@ def get_totp_uri(secret: str, username: str) -> str:
     totp = pyotp.TOTP(secret)
     return totp.provisioning_uri(
         name=username,
-        issuer_name="SmartMarketPlace"
+        issuer_name="SmartPipla"
     )
 
 

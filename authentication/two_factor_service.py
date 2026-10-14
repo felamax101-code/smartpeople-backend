@@ -24,13 +24,13 @@ def initiate_setup(user: CustomUser, method: str) -> dict:
     if method == "sms" and not user.phone_verified:
         return {
             "success": False,
-            "error": "Phone must be verified before enabling SMS 2FA"
+            "error": "To use phone number,ADD and VERIFY your phone number in Edit Profile Settings"
         }
 
     if method == "email" and not user.is_email_verified:
         return {
             "success": False,
-            "error": "Email must be verified before enabling Email 2FA"
+            "error": "Email must be verified before enabling Email 2FA.Verify in Edit Profile Settings"
         }
 
     tf = user.two_factor

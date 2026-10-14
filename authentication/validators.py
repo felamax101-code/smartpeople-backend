@@ -16,7 +16,7 @@ class EmailValidator:
         except ValidationError:
             raise ValidationError("To ensure security,please use a permanent email adress")
         if CustomUser.objects.filter(email__iexact=email).first():
-            raise ValidationError("Email already used to register another account.Try another one")
+            raise ValidationError("Email already used to register another account.Try another one or switch to login if it is yours")
         return email
 
 

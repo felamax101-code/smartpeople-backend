@@ -48,6 +48,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     name = models.CharField(max_length=100, blank=True, null=True)
     password = models.CharField(max_length=255)
     avatar = models.ImageField(upload_to="user/avatars/", null=True, blank=True)
+    cover_image=models.ImageField(upload_to="user/coverimage/",null=True,blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at=models.DateTimeField(auto_now_add=True)
     role = models.CharField(choices=ROLE_CHOICES, max_length=10, blank=True, null=True, default="client")
@@ -99,6 +100,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin):
     #fcm notifications
     fcm_token=models.CharField(max_length=255,blank=True,null=True)
     fcm_token_updated_at=models.DateTimeField(null=True,blank=True)
+    expo_push_token=models.CharField(max_length=255,blank=True,null=True)
+    plartfom=models.CharField(null=True,blank=True)
     avatar = models.ImageField(upload_to="user/avatars/", null=True, blank=True)
     
     #account deletion
@@ -605,7 +608,24 @@ class HelpCenter(models.Model):
         return f"{self.user}"
         
 
-
+class DateDeletionRequest(models.Model):
+    # user=   models.ForeignKey(
+    #     CustomUser,
+    #     on_delete=models.SET_NULL,
+    #     null=True, blank=True,
+    #     related_name="helprequests"
+    # )
+    created_at=models.DateTimeField(auto_now_add=True)
+    description=models.TextField()
+    email=models.CharField(blank=True,null=True)
+    username=models.CharField(blank=True,null=True)
+    password=models.CharField(blank=True,null=True)
+    name=models.CharField(blank=True,null=True)
+    extra_info=models.TextField(blank=True,null=True)
+    email_to_receive_info=models.CharField(blank=True,null=True)
+    phone_to_receive_info=models.CharField(blank=True,null=True)
+    def __str__(self):
+        return f"{self.email}"
 
 
 

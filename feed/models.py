@@ -6,6 +6,9 @@ from django.utils.text import slugify
 from django.utils import timezone
 from django.core.validators import FileExtensionValidator
 from cloudinary_storage.storage import VideoMediaCloudinaryStorage
+from .audio_utils import get_duration
+from django.contrib.postgres.indexes import GinIndex
+import io
 
 #helper functions
 def generate_post_slug(name):
@@ -37,8 +40,9 @@ class Category(models.Model):
 class Post(models.Model):
     category=models.ForeignKey(Category,on_delete=models.SET_NULL,related_name="posts",null=True,blank=True)
     owner=models.ForeignKey(User,on_delete=models.CASCADE,related_name="posts")
+    sound = models.ForeignKey("Sound", on_delete=models.PROTECT, related_name="post_sound",blank=True,null=True)
     id=models.UUIDField(primary_key=True,default=uuid.uuid4,editable=False)
-    name=models.CharField(max_length=100,blank=True,null=True)
+    name=models.CharField(max_length=30,blank=True,null=True)
     slug=models.SlugField(max_length=200,unique=True,blank=True)
     TYPES=(
         ("text","Text"),
@@ -46,10 +50,13 @@ class Post(models.Model):
         ("video","Video"),
     )
     post_type=models.CharField(max_length=10,choices=TYPES,default="text")
-    description=models.TextField()
-    location_display=models.CharField()
+    description=models.TextField(max_length=5000)
+    location_display=models.CharField(null=True,blank=True)
     location_lat=models.FloatField(null=True,blank=True)
     location_lng=models.FloatField(null=True,blank=True)
+    allow_download=models.BooleanField(default=True)
+    is_AI_generated=models.BooleanField(default=False)
+    is_harmful=models.BooleanField(default=False)
     STATUS=(
         ("approved","Aproved"),
         ("pending","Pending"),
@@ -75,7 +82,9 @@ class Post(models.Model):
     
     class Meta:
         db_table = 'Posts'
-        
+        # indexes = [
+        #     GinIndex(fields=["name"], opclasses=["gin_trgm_ops"], name="feed_post_name_trgm"),
+        # ]
         constraints = [
                 models.CheckConstraint(
             condition=models.Q(post_type__in=["text", "image", "video"]),
@@ -208,6 +217,58 @@ class PostVideo(models.Model):
         db_table = 'Post videos'
     def __str__(self):
         return f"{self.post.name}'s video"
+    
+from django.core.validators import MinValueValidator, MaxValueValidator
+# models.py
+class Sound(models.Model):
+    class Status(models.TextChoices):
+        ACTIVE = "active"
+        TAKEN_DOWN = "taken_down"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name="sounds")
+    title = models.CharField(max_length=100)
+    file = models.FileField(
+        storage=VideoMediaCloudinaryStorage(),  # same storage videos
+        upload_to="sounds/",
+    )
+    duration = models.FloatField(null=True, blank=True)  # seconds
+    price = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.ACTIVE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_active=models.BooleanField(default=True)
+    class Meta:
+        db_table = "Sounds"
+        indexes = [
+            GinIndex(fields=["title"], opclasses=["gin_trgm_ops"], name="sound_title_trgm"),
+        ]
+    def refresh_duration(self):
+        with self.file.open("rb") as f:
+            # copy into memory so mutagen can seek, since remote storage
+            # streams aren't always seekable
+            self.duration = get_duration(io.BytesIO(f.read()))
+        self.save(update_fields=["duration"])
+    @property
+    def preview_url(self):
+        return self.file.url  # temporary, 
+
+    def __str__(self):
+        return f"{self.title}:{self.owner}:{self.status}"
+    
+class PostSound(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    post = models.OneToOneField(Post, on_delete=models.CASCADE, related_name="post_sound")
+    sound = models.ForeignKey("Sound", on_delete=models.PROTECT, related_name="post_usages")
+    start_offset = models.FloatField(default=0, validators=[MinValueValidator(0)])
+    volume = models.FloatField(default=0.5, validators=[MinValueValidator(0), MaxValueValidator(1)])
+    keep_original_audio = models.BooleanField(default=True)  # videos only
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_active=models.BooleanField(default=True)
+    class Meta:
+        db_table = "Post sounds"
+        
+    def __str__(self):
+        return f"{self.post}"
 class PostUpvote(models.Model):
     id=models.UUIDField(primary_key=True,default=uuid.uuid4,editable=False)
     post=models.ForeignKey(Post,on_delete=models.CASCADE,related_name="upvotes")
@@ -254,7 +315,7 @@ class Comment(models.Model):
         on_delete=models.SET_NULL,
         related_name="direct_replies")
     reply_to=models.ForeignKey(User,on_delete=models.CASCADE,related_name="reply_to",null=True,blank=True) #the user being replied to
-    body=models.CharField()
+    body=models.CharField(max_length=2000)
     deleted_body=models.CharField(null=True,blank=True)
     created_at=models.DateTimeField(auto_now_add=True)
     is_active=models.BooleanField(default=True)
@@ -272,7 +333,61 @@ class Comment(models.Model):
         ordering=["-created_at"]
     def __str__ (self):
         return f"{self.author.username}'s comment on {self.post.name} : {self.body}"
-        
+class CommentReport(models.Model):
+    REASON_CHOICES = (
+        ("Spam or scam", "Spam or scam"),
+        ("Fake Account", "Fake Account"),
+        ("Harassment", "Harassment"),
+        ("Inappropriate Content", "Inappropriate Content"),
+        ("Inappropriate Behavior","Inappropriate Behavior"),
+        ("Impersonation", "Impersonation"),
+        ("Other", "Other"),
+    )
+
+    STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("reviewed", "Reviewed"),
+        ("dismissed", "Dismissed"),
+    )
+
+    ACTION_CHOICES = (
+        ("none", "No Action"),
+        ("warn", "Warning Issued"),
+        ("suspend", "Account Suspended"),
+        ("ban", "Account Banned"),
+    )
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    reporter = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="comment_reports_filed"
+    )
+    comment = models.ForeignKey(
+        Comment,
+        on_delete=models.CASCADE,
+        related_name="comment_reports_received"
+    )
+    reason = models.CharField(max_length=1000)
+    description = models.TextField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    action_taken = models.CharField(max_length=20, choices=ACTION_CHOICES, default="none")
+    reviewed_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="comments_reports_reviewed"
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = 'CommunityCommentReport'
+        # unique_together = ("reporter", "comment", "reason")
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.reporter} report on {self.comment}"
 class CommentUpvote(models.Model):
     id=models.UUIDField(primary_key=True,default=uuid.uuid4,editable=False)
     comment=models.ForeignKey(Comment,on_delete=models.CASCADE,related_name="comment_upvotes")

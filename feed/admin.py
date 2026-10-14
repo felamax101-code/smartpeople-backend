@@ -1,8 +1,14 @@
 from django.contrib import admin
 from .models import (Post,Category,PostImage,Review,SavedPost,
                     Comment, CommentUpvote,CommentDownvote,Message,Conversation,PostVideo,
-                    PostReport,ConversationParticipant,ConversationDeletes,MessageDeletes)
+                    PostReport,ConversationParticipant,ConversationDeletes,MessageDeletes,
+                    Sound,PostSound,PostViews)
 
+@admin.register(PostViews)
+class PostViewsAdmin(admin.ModelAdmin):
+    list_display=["user"]
+    list_filter=["user","post"]
+    
 @admin.register(Category)
 class CategoryAdmin(admin.ModelAdmin):
     list_display=["name","slug","is_active","order"]
@@ -10,10 +16,18 @@ class CategoryAdmin(admin.ModelAdmin):
     list_editable=["is_active"]
 
 @admin.register(ConversationDeletes)
-class ConversationDeletesAdmin(admin.ModelAdmin):
+class SoundAdmin(admin.ModelAdmin):
     list_display=["user","conversation","is_active","created_at"]
     list_filter=["user","conversation"]
+@admin.register(Sound)
+class ConversationDeletesAdmin(admin.ModelAdmin):
+    list_display=["owner","status"]
+    list_filter=["owner","status"]
 
+@admin.register(PostSound)
+class PostSoundAdmin(admin.ModelAdmin):
+    list_display=["post","is_active"]
+    list_filter=["post","is_active"]
 
 
 @admin.register(MessageDeletes)
@@ -83,7 +97,7 @@ class MessageAdmin(admin.ModelAdmin):
     
 @admin.register(Conversation)
 class ConversationAdmin(admin.ModelAdmin):
-    list_display=["id","post","last_message_at","created_at","is_group","group_name"]
+    list_display=["id","post","last_message_at","created_at","is_group","group_name","last_message_preview"]
     search_fields=["id","post__name","group_name"]
     list_filter=["is_group"]
 @admin.register(ConversationParticipant)

@@ -4,10 +4,11 @@ from .views import (PostCreateView,PostListCreateView,CommentCreateView,FollowVi
                     SavedPostView,CatagoryListView,ProfileApprovalView,ReviewAPIview,
                     CommentRepliesView,CommentReplyView,CommentVoteView,PostByIdView,UserListCreateView,
                     PostReportView,SearchUsersView,ProfileSitemapView,PostSitemapView,PostViewsView,ViewsCount,
-                    OtherPersonPropertyProfileView,ListingApplicationCreateView,MyListingApplicationStatusView,MyPropertyProfileView)
+                    OtherPersonPropertyProfileView,ListingApplicationCreateView,PostVideoStatusView,MyListingApplicationStatusView,MyPropertyProfileView)
 
 
 urlpatterns = [
+    path("post-videos/<uuid:video_id>/status/", PostVideoStatusView.as_view()),
     #admin actions
     path("admin/postts/",ProfileApprovalView.as_view(),name="admin-post-list"),
     path("admin/postts/<uuid:id>",ProfileApprovalView.as_view(),name="admin-post-action"),

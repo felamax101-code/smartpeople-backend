@@ -140,8 +140,11 @@ REST_FRAMEWORK = {
      "DEFAULT_THROTTLE_RATES":{
          "anon":"100/hour",
          "user":"1000/hour",
-	"video_status": "40/min"
+	    "video_status": "40/min",
+        "sound_upload_hour": "2/hour",
+        "sound_upload_day": "5/day",
      },
+     "NUM_PROXIES": 2,
     
     'EXCEPTION_HANDLER': 'authentication.exceptions.custom_exception_handler',
 }
@@ -153,14 +156,15 @@ SIMPLE_JWT = {
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-q^p2d6jx12f(95hlp$6##6jj(f2$-#a-si=$+p8y1ge2cz#a4l'
-
+SECRET_KEY = config("SECRET_KEY")
+FERNET_KEY=config("FERNET_KEY")
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = False
 
 ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='').split(',')
 CORS_ALLOWED_ORIGINS= config('CORS_ALLOWED_ORIGINS', default='').split(',')
 CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS", default="").split(',')
+
 REPORT_THRESHOLDS = {
     3: "flagged",
     10: "suspended",
@@ -174,8 +178,10 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    "django.contrib.postgres",
     #thirdpartry
     "channels",
+    "corsheaders",
     
     #locals
     "authentication",
@@ -186,6 +192,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -287,6 +294,7 @@ USE_I18N = True
 USE_TZ = True
 
 
+
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
@@ -315,3 +323,5 @@ CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
 CELERY_TIMEZONE = "Africa/Nairobi"  # match this to your actual TIME_ZONE setting
+
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")

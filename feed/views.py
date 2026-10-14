@@ -2,6 +2,8 @@ from django.shortcuts import render
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
+from rest_framework.parsers import FormParser, MultiPartParser,JSONParser
+
 from .permissions import IsAdminOrStaff
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.views import APIView
@@ -9,18 +11,21 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Q, Value, IntegerField, Case, When
 from authentication.models import Follow
-from .models import PostVideo,PostViews,Post,Comment,PostUpvote,CommentDownvote,CommentUpvote,Category,Review,SavedPost,PostRepost
+from .models import (PostVideo,PostViews,Post,Comment,PostUpvote,CommentDownvote,CommentUpvote,Category,Review,SavedPost,PostRepost,
+                     CommentReport,Sound,PostSound)
 from .serializers import (PostSerializer,PostListSerializer,CommentSerializer,CommentCreateSerializer,
                           CategorySerializer,ReviewSerializer,OwnPostListSerializer,CommentEditSerializer,
-                          PostReportSerializer,SavedPostSerializer,SearchUsersSerializer)
+                          PostReportSerializer,SavedPostSerializer,SearchUsersSerializer
+                          ,SoundUploadSerializer,SoundListSerializer,SoundFilterSerializer)
 from .pagination import CustomPagination  
 from .geo import annotate_distance
+from django.contrib.postgres.search import TrigramWordSimilarity
 from django.db.models import Q
 from django.contrib.auth import get_user_model
 User=get_user_model()
 # views.py, temporary
 from sp.celery import app as celery_app
-from .throttles import VideoStatusThrottle
+from .throttles import VideoStatusThrottle,SoundUploadHourlyThrottle,SoundUploadDailyThrottle
 def debug_celery_view(request):
     celery_app.send_task("sp.celery.debug_task")
     return HttpResponse("Task sent")
@@ -88,11 +93,112 @@ class CatagoryListView(APIView):
             "success":True,
             "data":serializer.data
         },status=200)
+      
+class SoundListView(APIView):
+    permission_classes = [IsAuthenticated]
 
+    def get(self, request):
+        filters = SoundFilterSerializer(data=request.query_params)
+        filters.is_valid(raise_exception=True)
+        params = filters.validated_data
+
+        queryset = Sound.objects.filter(status="active").select_related("owner")
+
+        owner = params.get("owner", "").strip()
+        if owner:
+            queryset = queryset.filter(owner__username__iexact=owner)
+
+        if params.get("min_duration") is not None:
+            queryset = queryset.filter(duration__gte=params["min_duration"])
+        if params.get("max_duration") is not None:
+            queryset = queryset.filter(duration__lte=params["max_duration"])
+
+        q = params.get("q", "").strip()
+        if q:
+            rank = Case(
+                When(title__iexact=q, then=Value(0)),
+                When(title__istartswith=q, then=Value(1)),
+                When(title__icontains=q, then=Value(2)),
+                default=Value(3),            # typo matches land here
+                output_field=IntegerField(),
+            )
+            queryset = queryset.annotate(rank=rank)
+
+            if len(q) >= 3:  # very short queries have too few trigrams to be meaningful
+                queryset = (
+                    queryset
+                    .annotate(similarity=TrigramWordSimilarity(q, "title"))
+                    .filter(Q(title__icontains=q) | Q(similarity__gt=0.3))
+                    .order_by("rank", "-similarity", "-created_at", "id")
+                )
+            else:
+                queryset = (
+                    queryset.filter(title__icontains=q)
+                    .order_by("rank", "-created_at", "id")
+                )
+        else:
+            queryset = queryset.order_by("-created_at", "id")
+        
+
+        paginator = CustomPagination()
+        page = paginator.paginate_queryset(queryset, request)
+        serializer = SoundListSerializer(page, many=True, context={"request": request})
+        return Response({
+            "success": True,
+            "data": {
+                "sounds": serializer.data,
+                "pagination": {
+                    "page": paginator.page.number,
+                    "page_size": paginator.get_page_size(request),
+                    "total": paginator.page.paginator.count,
+                    "total_pages": paginator.page.paginator.num_pages,
+                    "has_next": paginator.page.has_next(),
+                    "has_prev": paginator.page.has_previous(),
+                }
+            }
+        }, status=status.HTTP_200_OK)
+class SoundUploadView(APIView):
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser,JSONParser]
+    # throttle_classes = [SoundUploadHourlyThrottle, SoundUploadDailyThrottle]
+    def post(self, request):
+        serializer = SoundUploadSerializer(data=request.data, context={"request": request})
+        serializer.is_valid(raise_exception=True)
+        sound = serializer.save(owner=request.user)
+
+        return Response({
+            "success": True,
+            "data": {
+                "sound": SoundListSerializer(sound, context={"request": request}).data
+            }
+        }, status=status.HTTP_201_CREATED)
+    def patch(self,request,id):
+        try:
+            sound=Sound.objects.get(id=id)
+        except Sound.DoesNotExist:
+            return Response(status=404)
+        if request.user!=sound.owner:
+            return Response(status=401)
+        new_name=request.data.get("title",)
+        if not new_name or not new_name.strip():
+            return Response("Provide new title")
+        sound.title=sanitize_plain(new_name)
+        sound.save()
+        return Response({"data":sound.title},status=200)
+    def delete(self,request,id):
+        try:
+            sound=Sound.objects.get(id=id)
+        except Sound.DoesNotExist:
+            return Response(status=404)
+        if request.user!=sound.owner:
+            return Response(status=401)
+        sound.is_active=False
+        sound.save()
+        return Response(status=200)
 class PostListCreateView(APIView):
     permission_classes=[AllowAny]
     def get(self, request):
-        queryset = Post.objects.filter(status="approved",is_active=True)
+        queryset = Post.objects.filter(status="approved",is_active=True).select_related("owner","post_sound__sound__owner")
         
         # --- Filtering ---
         user= request.query_params.get("user")
@@ -297,7 +403,7 @@ class PostCreateView(APIView):
         
         
         try:
-            post=Post.objects.get(slug=slug)
+            post=Post.objects.get(slug=slug).select_related("owner","post_sound__sound__owner")
             return Response(PostSerializer(post,context={"request": request}).data,status=200)
         except Post.DoesNotExist:
             return Response({
@@ -607,15 +713,20 @@ class CommmentReportView(APIView):
     permission_classes=[IsAuthenticated]
     def post(self,request,id):
         comment=Comment.objects.get(id=id)
-        reason=request.data.get("reason")
+        reason=request.get("reason")
         if not comment:
             return Response({
-                "message":"The comment you are attempting to delete does not exist"
+                "message":"The comment you are attempting to report does not exist"
             },status=400)
         comment.is_reported=True
-        comment.reporter=request.user
-        reason=sanitize_plain(reason)
-        comment.report_reason=reason
+        try:
+            CommentReport.objects.create(
+            reporter=request.user,
+            comment=comment,
+            reason=sanitize_plain(reason)    
+        )
+        except Exception:
+            return Response("error",status=400)
         comment.save()
         return Response({
             "message":"Report submitted"

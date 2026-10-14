@@ -7,7 +7,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Q, Value, IntegerField, Case, When
 from authentication.models import Follow
-from .models import PostViews,Post,Comment,PostUpvote,CommentDownvote,CommentUpvote,Category,Review,SavedPost,PropertyProfile,ListingApplication,PostReport
+from .models import PostVideo,PostViews,Post,Comment,PostUpvote,CommentDownvote,CommentUpvote,Category,Review,SavedPost,PropertyProfile,ListingApplication,PostReport
 from .serializers import (PostSerializer,PostListSerializer,CommentSerializer,CommentCreateSerializer,
                           CategorySerializer,ReviewSerializer,OwnPostListSerializer,CommentEditSerializer,
                           PostReportSerializer,SavedPostSerializer,SearchUsersSerializer,PropertyProfileSerializer,ListingApplicationSerializer)
@@ -16,8 +16,20 @@ from feed.geo import annotate_distance
 from django.db.models import Q
 from django.contrib.auth import get_user_model
 User=get_user_model()
-
-
+from feed.throttles import VideoStatusThrottle
+class PostVideoStatusView(APIView):
+    permission_classes = [AllowAny]
+    throttle_classes = [VideoStatusThrottle]
+    def get(self, request, video_id):
+        try:
+            pv = PostVideo.objects.get(id=video_id)
+        except PostVideo.DoesNotExist:
+            return Response({"error": "not found"}, status=404)
+        return Response({
+            "id": pv.id,
+            "status": pv.processing_status,
+            "url": pv.video.url if pv.video else None,
+        })
 class MyPropertyProfileView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -64,11 +76,35 @@ class ListingApplicationCreateView(APIView):
         serializer.save(user=request.user)
 
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+    def patch(self, request):
+        # enforce: no new application while one is still pending
+        has_pending = ListingApplication.objects.filter(
+            user=request.user, status="pending"
+        ).exists()
+
+        if has_pending:
+            return Response(
+                {"error": "You already have a pending application."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # block reapplying if already approved (already has posting rights)
+        profile = PropertyProfile.objects.filter(user=request.user).first()
+        if profile and profile.can_post_listings:
+            return Response(
+                {"error": "You're already approved to post listings."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = ListingApplicationSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(user=request.user)
+
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 class MyListingApplicationStatusView(APIView):
     permission_classes = [IsAuthenticated]
-
     def get(self, request):
         application = (
             ListingApplication.objects.filter(user=request.user)
@@ -146,7 +182,7 @@ class CatagoryListView(APIView):
 class PostListCreateView(APIView):
     permission_classes=[AllowAny]
     def get(self, request):
-        queryset = Post.objects.filter(status="approved",is_active=True)
+        queryset = Post.objects.filter(status="approved",is_active=True).select_related("owner","post_sound__sound__owner")
         
         # --- Filtering ---
         user= request.query_params.get("user")
@@ -364,18 +400,29 @@ class PostCreateView(APIView):
         
         
         try:
-            post=Post.objects.get(slug=slug)
+            post=Post.objects.get(slug=slug).select_related("owner","post_sound__sound__owner")
             return Response(PostSerializer(post,context={"request": request}).data,status=200)
         except Post.DoesNotExist:
             return Response({
                 "error":"Post requested does not exist"
             },status=400)
-    def post(self,request):
-        serializer=PostSerializer(data=request.data,context={'request':request})
+    def post(self, request):
+        client_upload_id = request.data.get("client_upload_id")
+        if client_upload_id:
+            existing = Post.objects.filter(client_upload_id=client_upload_id).first()
+            if existing:
+                # this exact submission already succeeded — hand back its current
+                # state instead of creating a duplicate post + duplicate transcode job
+                return Response(PostSerializer(existing, context={"request": request}).data, status=200)
+        try:
+            property_profile=PropertyProfile.objects.get(user=request.user)
+        except PropertyProfile.DoesNotExist:
+            return Response("Not allowed to access this point",status=400)
+        serializer = PostSerializer(data=request.data, context={'request': request,"property_profile":property_profile})
         if serializer.is_valid():
             serializer.save()
-            return Response(serializer.data,status=201)
-        return Response(serializer.errors,status=400)
+            return Response(serializer.data, status=201)
+        return Response(serializer.errors, status=400)
     def put(self,request,slug):
         user=request.user
         try:
@@ -756,7 +803,6 @@ class PostReportView(APIView):
         )
             return Response("reported", status=201)
         except Exception as e:
-            print(e)
             return Response("Report failed", status=400)
 
 

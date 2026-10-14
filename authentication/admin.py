@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from .models import( CustomUser,Contacts,Follow,LoginActivity,
                     VerificationRequest,UserSession,Notification,LoginActivity,TwoFactorSettings,TrustedDevice,
-                    ProfileReport,ReportAppeal,ProfileBlock,LoginActivity,HelpCenter
+                    ProfileReport,ReportAppeal,ProfileBlock,LoginActivity,HelpCenter,DateDeletionRequest
                     )
 
 
@@ -17,7 +17,9 @@ class CustomUserAdmin(UserAdmin):
         ('Personal', {'fields': ('username', 'name', 'avatar',"bio","phone")}),
         ('Status', {'fields': ('role', 'is_email_verified', "phone_verified",'is_deactivated',"is_active", 'is_locked', 'is_staff', 'is_superuser',"last_email_change","last_phone_change")}),
         ('Counts', {'fields': ("followers","following","total_posts","reviews_count","rating")}),
-        ('OTP / Reset', {'fields': ("new_email",'email_otp', 'email_otp_expiry', 'password_change_otp', 'password_change_expiry', 'password_reset_otp', 'password_reset_otp_expiry',"new_phone","phone_otp","phone_otp_expiry","account_delete_email_otp","account_delete_email_otp_expiry")}),
+        ('OTP / Reset', {'fields': ("new_email",'email_otp', 'email_otp_expiry',
+                                    'password_change_otp', 'password_change_expiry', 'password_reset_otp', 'password_reset_otp_expiry',"new_phone","phone_otp","phone_otp_expiry","account_delete_email_otp",
+                                    "account_delete_email_otp_expiry","expo_push_token","plartfom")}),
     )
     add_fieldsets = (
         (None, {'classes': ('wide',), 'fields': ('email', 'username', 'password1', 'password2')}),
@@ -53,6 +55,12 @@ class LoginActivityAdmin(admin.ModelAdmin):
     ordering = ['-created_at']
     search_fields = ['user__username',"was_suspicious"]
     list_filter = ['user__username']
+    
+@admin.register(DateDeletionRequest)
+class LoginActivityAdmin(admin.ModelAdmin):
+    list_display = ['email', 'username']
+    ordering = ['-created_at']
+    search_fields = ['email',"username"]
     
     
     

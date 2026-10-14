@@ -6,9 +6,10 @@ from feed.models import SavedPost
 from feed.utils import save_temp_upload
 from .tasks import transcode_and_attach_video
 from rest_framework import serializers
-
+from feed.serializers import PostSoundSerializer,SoundListSerializer
 from django.contrib.auth import get_user_model
 User=get_user_model()
+from django.db import transaction
 from feed.serializers import UserSerializer,PostOwnerSerializer
 from feed.sanitize import sanitize_plain
 import filetype
@@ -65,7 +66,7 @@ class ImageSerializer(serializers.ModelSerializer):
 class VideoSerializer(serializers.ModelSerializer):
     class Meta:
         model=CommunityPostVideo
-        fields=["id","video","order"]
+        fields=["id","video","order","processing_status"]
         
 class PostListSerializer(serializers.ModelSerializer):
     is_upvoted=serializers.SerializerMethodField()
@@ -74,6 +75,7 @@ class PostListSerializer(serializers.ModelSerializer):
     images=ImageSerializer(many=True,read_only=True)
     videos=VideoSerializer(many=True,read_only=True)
     category=CategorySerializer(read_only=True)
+    sound = serializers.SerializerMethodField()
     class Meta:
         model=CommunityPost
         fields=["id","name","description","post_type","saves_count",
@@ -93,7 +95,14 @@ class PostListSerializer(serializers.ModelSerializer):
         if not request.user.is_authenticated:
             return None
         return CommunityPostUpvote.objects.filter(post=obj,voter=request.user).exists()
-  
+    def get_sound(self, obj):
+        ps = getattr(obj, "post_sound", None)
+        if ps is None:
+            return None
+        # takedown: photo posts lose their music; videos have it baked in already
+        if ps.sound.status != "active" and obj.post_type == "image":
+            return None
+        return PostSoundSerializer(ps).data
     def get_is_saved(self,obj):
         request=self.context.get("request")
         if not request:
@@ -118,6 +127,8 @@ class PostSerializer(serializers.ModelSerializer):
     videos     = VideoSerializer(many=True, read_only=True)
     is_upvoted = serializers.SerializerMethodField()
     is_saved=serializers.SerializerMethodField()
+    sound_id = serializers.UUIDField(write_only=True, required=False) 
+    sound = serializers.SerializerMethodField() 
 
     class Meta:
         model  = CommunityPost
@@ -126,9 +137,16 @@ class PostSerializer(serializers.ModelSerializer):
             "category", "owner", "images", "slug", "videos", "media", "created_at",
             "views_count", "location_display", "location_lat", "is_upvoted",
             "location_lng", "status", "upvotes_count", "comments_count",
-            "sponsored", "media_type","is_saved","saves_count"
+            "sponsored", "media_type","is_saved","saves_count","sound_id","sound"
         ]
-
+    def get_sound(self, obj):
+        ps = getattr(obj, "post_sound", None)
+        if ps is None:
+            return None
+        # takedown: photo posts lose their music; videos have it baked in already
+        if ps.sound.status != "active" and obj.post_type == "image":
+            return None
+        return PostSoundSerializer(ps).data
     def get_is_upvoted(self, obj):
         request = self.context.get("request")
         if not request or not request.user.is_authenticated:
@@ -175,28 +193,72 @@ class PostSerializer(serializers.ModelSerializer):
             data["owner"] = request.user
 
         return data
+    def _pop_sound_data(self, validated_data):
+        sound = validated_data.pop("sound_obj", None)
+        start = validated_data.pop("music_start", 0)
+        volume = validated_data.pop("music_volume", 0.5)
+        keep = validated_data.pop("keep_original_audio", True)
+        validated_data.pop("sound_id", None)
+        if sound is None:
+            return None
+        return {"sound": sound, "start_offset": start,
+                "volume": volume, "keep_original_audio": keep}
+    def _validate_sound(self, data, request):
+        sound_id = data.get("sound_id")
 
+        if sound_id is None:
+            for f in SOUND_INPUT_FIELDS:   # settings without a sound are meaningless
+                data.pop(f, None)
+            return data
+
+        post_type = data.get("post_type") or (self.instance.post_type if self.instance else None)
+        if post_type != "image":
+            raise serializers.ValidationError({"sound_id": "Text posts can't have music."})
+        if self.instance and self.instance.post_type == "video":
+            raise serializers.ValidationError(
+                {"sound_id": "Music can't be changed after a video is posted."}
+            )
+
+        try:
+            sound = Sound.objects.get(id=sound_id, status="active")
+        except Sound.DoesNotExist:
+            raise serializers.ValidationError({"sound_id": "This sound is not available."})
+
+        if not user_can_use_sound(request.user, sound):
+            raise serializers.ValidationError({"sound_id": "You need a license to use this sound."})
+
+        if sound.duration and data.get("music_start", 0) >= sound.duration:
+            raise serializers.ValidationError({"music_start": "Start time is past the end of the track."})
+
+        data["sound_obj"] = sound   # resolved object, so create() doesn't query again
+        return data
     def create(self, validated_data):
         media_files = validated_data.pop("media", [])
         media_type  = validated_data.pop("media_type", None)
+        sound_data = self._pop_sound_data(validated_data)
         user        = validated_data["owner"]
         category_id = validated_data.pop("category")
         community=self.context.get("community")
         category = CommunityCategoryPost.objects.get(id=category_id,community=community)
         post  = CommunityPost.objects.create(category=category,community=community ,**validated_data)
 
-        if media_type == "video":
-            for index, file in enumerate(media_files):
-                post_video = CommunityPostVideo.objects.create(
-            owner=user, post=post, is_cover=(index == 0)
-        )
-                tmp_path = save_temp_upload(file, post_video.id)
-                transcode_and_attach_video.delay(str(post_video.id), tmp_path)
-        elif media_type == "photo":
-            for index, file in enumerate(media_files):
-                CommunityPostImage.objects.create(
-                    owner=user, post=post, image=file, is_cover=(index == 0)
-                )
+        with transaction.atomic():
+            category = Category.objects.get(id=category_id)
+            post = Post.objects.create(category=category, **validated_data)
+
+            if sound_data:
+                PostSound.objects.create(post=post, **sound_data)
+
+            if media_type == "video":
+                for index, file in enumerate(media_files):
+                    post_video = PostVideo.objects.create(owner=user, post=post, is_cover=(index == 0))
+                    tmp_path = save_temp_upload(file, post_video.id)
+                    transaction.on_commit(
+                        partial(transcode_and_attach_video.delay, str(post_video.id), tmp_path)
+                    )
+            elif media_type == "photo":
+                for index, file in enumerate(media_files):
+                    PostImage.objects.create(owner=user, post=post, image=file, is_cover=(index == 0))
 
         return post
 
@@ -204,21 +266,25 @@ class PostSerializer(serializers.ModelSerializer):
         media_files = validated_data.pop("media", [])
         media_type  = validated_data.pop("media_type", None)
         category_id = validated_data.pop("category", None)
-        community=instance.community
+        sound_data = self._pop_sound_data(validated_data)
+        if sound_data:
+            PostSound.objects.update_or_create(post=instance, defaults=sound_data)
         if category_id:
-            instance.category = CommunityCategoryPost.objects.get(id=category_id,community=community)
+            instance.category = Category.objects.get(id=category_id)
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
+
         # Only append new media if provided , existing media is untouched
         if media_files and media_type == "video":
             for index, file in enumerate(media_files):
-                CommunityPostVideo.objects.create(
+                PostVideo.objects.create(
                     owner=instance.owner, post=instance, video=file, is_cover=(index == 0)
                 )
         elif media_files and media_type == "photo":
             for index, file in enumerate(media_files):
-                CommunityPostImage.objects.create(
+                PostImage.objects.create(
                     owner=instance.owner, post=instance, image=file, is_cover=(index == 0)
                 )
 
@@ -277,7 +343,7 @@ class CommentEditSerializer(serializers.Serializer):
     
 
 class CommentCreateSerializer(serializers.Serializer):
-    body=serializers.CharField(required=True)
+    body=serializers.CharField(required=True,max_length=2000)
     
     class Meta:
         model=CommunityPostComment

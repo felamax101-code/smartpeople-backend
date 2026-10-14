@@ -11,7 +11,7 @@ from rest_framework import status
 from .models import (Community,Membership,CommunityCategoryPost,CommunityPost,
                      CommunityPostReport,CommunityPostImage,CommunityPostVideo,CommunityPostUpvote,
                      CommunityPostComment,CommunityCommentUpvote,CommunityCommentDownvote,
-                     CommunitySavedPost,CommunityInvites,CommunityJoinRequest,PostViews)
+                     CommunitySavedPost,CommunityInvites,CommunityJoinRequest,PostViews,CommunityCommentReport)
 
 
 from feed.serializers import UserSerializer
@@ -105,7 +105,7 @@ class PostListCreateView(APIView):
                 "error":"The requested community does not exist"
             },status=400)
             
-        queryset = CommunityPost.objects.filter(community=community,status="approved",is_active=True)
+        queryset = CommunityPost.objects.filter(community=community,status="approved",is_active=True).select_related("owner","post_sound__sound__owner")
         
         # --- Filtering ---
         category = request.query_params.get("category")
@@ -173,7 +173,7 @@ class PendingPostListCreateView(APIView):
                 "error":"The requested community does not exist"
             },status=400)
         self.check_object_permissions(request,community)
-        queryset = CommunityPost.objects.filter(community=community,status="pending",is_active=True)
+        queryset = CommunityPost.objects.filter(community=community,status="pending",is_active=True).select_related("owner","post_sound__sound__owner")
         
         # --- Filtering ---
         category = request.query_params.get("category")
@@ -239,7 +239,7 @@ class RejecetedPostListCreateView(APIView):
                 "error":"The requested community does not exist"
             },status=400)
         self.check_object_permissions(request,community)
-        queryset = CommunityPost.objects.filter(community=community,status="rejected",is_active=True)
+        queryset = CommunityPost.objects.filter(community=community,status="rejected",is_active=True).select_related("owner","post_sound__sound__owner")
         
         # --- Filtering ---
         category = request.query_params.get("category")
@@ -316,7 +316,7 @@ class PostCreateView(APIView):
         return [IsAuthenticated(),IsCommunityMember()]
     def get(self,request,slug):
         try:
-            post=CommunityPost.objects.get(slug=slug)
+            post=CommunityPost.objects.get(slug=slug).select_related("owner","post_sound__sound__owner")
             return Response(PostSerializer(post,context={"request": request}).data,status=200)
         except CommunityPost.DoesNotExist:
             return Response({
@@ -649,12 +649,18 @@ class CommmentReportView(APIView):
         reason=request.get("reason")
         if not comment:
             return Response({
-                "message":"The comment you are attempting to delete does not exist"
+                "message":"The comment you are attempting to report does not exist"
             },status=400)
         comment.is_reported=True
-        comment.reporter=request.user
+        try:
+            CommunityCommentReport.objects.create(
+            reporter=request.user,
+            comment=comment,
+            reason=sanitize(reason)    
+        )
+        except Exception:
+            return Response("error",status=400)
         reason=sanitize(reason)
-        comment.report_reason=reason
         comment.save()
         return Response({
             "message":"Report submitted"
@@ -716,24 +722,22 @@ class PostReportView(APIView):
 
     def post(self, request, id):
         try:
-            target = Post.objects.get(id=id)
-        except User.DoesNotExist:
+            target = CommunityPost.objects.get(id=id)
+        except CommunityPost.DoesNotExist:
             return Response({"error": "post not found"}, status=404)
         serializer = PostReportSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=400)
 
-        result = submit_post_report(
-            reporter=request.user,
-            post=target,
-            reason=serializer.validated_data["reason"],
-            description=serializer.validated_data.get("description")
-        )
-
-        if not result["success"]:
-            return Response({"error": result["error"]}, status=400)
-
-        return Response(result, status=201)
+        CommunityPostReport.objects.create( 
+                    reporter=request.user,
+                    post=target,
+                    reason=serializer.validated_data["reason"],
+                    description=serializer.validated_data.get("description")
+                    
+                                                    )
+        
+        return Response("success", status=201)
     
     
 class SearchMembersView(APIView):
@@ -1577,7 +1581,7 @@ class RejectPostView(APIView):
             status=status.HTTP_404_NOT_FOUND
         )
             
-        post.status="approved"
+        post.status="rejected"
         post.rejection_reason=reason
         post.save()
         return Response({

@@ -3,10 +3,18 @@ from .views import (debug_celery_view,PostCreateView,PostListCreateView,CommentC
                     PostUpvoteView,CommmentReportView,
                     SavedPostView,CatagoryListView,ProfileApprovalView,ReviewAPIview,
                     CommentRepliesView,CommentReplyView,CommentVoteView,PostByIdView,UserListCreateView,
-                    PostReportView,SearchUsersView,ProfileSitemapView,PostSitemapView,PostViewsView,ViewsCount,PostRepostView,PostVideoStatusView)
+                    PostReportView,SearchUsersView,ProfileSitemapView,PostSitemapView,PostViewsView,
+                    ViewsCount,PostRepostView,PostVideoStatusView,SoundUploadView,SoundListView)
 
 
 urlpatterns = [
+    
+    #sound upload
+    path("sounds/upload/", SoundUploadView.as_view(), name="sound-upload"),
+    path("sounds/<uuid:id>/", SoundUploadView.as_view(), name="sound-edit/delete"),
+    #list sounds
+    # urls.py
+    path("sounds/list/", SoundListView.as_view(), name="sound-list"),
     #admin actions
     path("debug-celery/", debug_celery_view),
     path("admin/postts/",ProfileApprovalView.as_view(),name="admin-post-list"),
